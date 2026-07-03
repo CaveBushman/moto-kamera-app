@@ -33,35 +33,39 @@ class ZoomRocker(QWidget):
         self._dragging = False
         self._active = True
         self._compact = False
-        self._set_geometry(
-            DEFAULT_WIDGET_WIDTH,
-            DEFAULT_WIDGET_HEIGHT,
-            DEFAULT_TRACK_WIDTH,
-            DEFAULT_TRACK_HEIGHT,
-            DEFAULT_KNOB_RADIUS,
-        )
+        self._size_scale = 1.0
+        self._apply_geometry()
 
     def set_compact(self, compact: bool) -> None:
         if compact == self._compact:
             return
         self._compact = compact
-        if compact:
-            self._set_geometry(
-                COMPACT_WIDGET_WIDTH,
-                COMPACT_WIDGET_HEIGHT,
-                COMPACT_TRACK_WIDTH,
-                COMPACT_TRACK_HEIGHT,
-                COMPACT_KNOB_RADIUS,
+        self._apply_geometry()
+        self.update()
+
+    def set_size_scale(self, scale: float) -> None:
+        """Operator-tunable enlargement (glove-friendly) -- see
+        display.controls_scale."""
+        scale = max(0.5, min(3.0, scale))
+        if scale == self._size_scale:
+            return
+        self._size_scale = scale
+        self._apply_geometry()
+        self.update()
+
+    def _apply_geometry(self) -> None:
+        if self._compact:
+            w, h, tw, th, knob = (
+                COMPACT_WIDGET_WIDTH, COMPACT_WIDGET_HEIGHT,
+                COMPACT_TRACK_WIDTH, COMPACT_TRACK_HEIGHT, COMPACT_KNOB_RADIUS,
             )
         else:
-            self._set_geometry(
-                DEFAULT_WIDGET_WIDTH,
-                DEFAULT_WIDGET_HEIGHT,
-                DEFAULT_TRACK_WIDTH,
-                DEFAULT_TRACK_HEIGHT,
-                DEFAULT_KNOB_RADIUS,
+            w, h, tw, th, knob = (
+                DEFAULT_WIDGET_WIDTH, DEFAULT_WIDGET_HEIGHT,
+                DEFAULT_TRACK_WIDTH, DEFAULT_TRACK_HEIGHT, DEFAULT_KNOB_RADIUS,
             )
-        self.update()
+        s = self._size_scale
+        self._set_geometry(int(w * s), int(h * s), int(tw * s), int(th * s), int(knob * s))
 
     def set_active(self, active: bool) -> None:
         if active == self._active:

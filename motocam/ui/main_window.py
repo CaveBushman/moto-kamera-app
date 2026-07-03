@@ -151,6 +151,13 @@ class MainWindow(QMainWindow):
         panels_row.addWidget(self.camera_panel, stretch=1)
         panels_row.addWidget(self.gimbal_panel, stretch=1)
         self.preview.set_hud_widget(hud)
+        # Glove-friendly thumb controls (design doc 11.1/12.3): the
+        # PTT/zoom/joystick default sizes felt small on the real Pi
+        # touchscreen -- display.controls_scale enlarges them on top of
+        # the global UI scale, tunable without touching code.
+        controls_scale = float(self._config.get("display", {}).get("controls_scale", 1.0))
+        if controls_scale != 1.0:
+            self.preview.set_controls_scale(controls_scale)
         # SETTINGS mirrors the CAM/GIMBAL toggle on the opposite corner --
         # always reachable, not tucked inside the collapsible HUD.
         self.preview.settings_button.clicked.connect(self._open_settings)

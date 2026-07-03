@@ -21,14 +21,28 @@ class PTTButton(QWidget):
         self._talking = False
         self._available = True
         self._compact = False
+        self._size_scale = 1.0
         self._widget_size = DEFAULT_WIDGET_SIZE
-        self.setFixedSize(DEFAULT_WIDGET_SIZE, DEFAULT_WIDGET_SIZE)
+        self._apply_geometry()
 
     def set_compact(self, compact: bool) -> None:
         if compact == self._compact:
             return
         self._compact = compact
-        self._widget_size = COMPACT_WIDGET_SIZE if compact else DEFAULT_WIDGET_SIZE
+        self._apply_geometry()
+
+    def set_size_scale(self, scale: float) -> None:
+        """Operator-tunable enlargement (glove-friendly) -- see
+        display.controls_scale."""
+        scale = max(0.5, min(3.0, scale))
+        if scale == self._size_scale:
+            return
+        self._size_scale = scale
+        self._apply_geometry()
+
+    def _apply_geometry(self) -> None:
+        base = COMPACT_WIDGET_SIZE if self._compact else DEFAULT_WIDGET_SIZE
+        self._widget_size = int(base * self._size_scale)
         self.setFixedSize(self._widget_size, self._widget_size)
         self.update()
 

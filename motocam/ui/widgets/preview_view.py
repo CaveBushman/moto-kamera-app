@@ -133,6 +133,14 @@ class PreviewView(QFrame):
         self._link_connected = False
         self._preview_streaming = False
 
+    def set_controls_scale(self, scale: float) -> None:
+        """Enlarge the PTT/zoom/joystick thumb controls (display.controls_scale)
+        for glove operation, then re-place them for the new sizes."""
+        self.joystick.set_size_scale(scale)
+        self.zoom_rocker.set_size_scale(scale)
+        self.ptt_button.set_size_scale(scale)
+        self._reposition_layout()
+
     def set_hud_widget(self, widget: QWidget) -> None:
         """Host the CAMERA/GIMBAL readout panels as a floating overlay on
         top of the live feed instead of a solid row that steals height from

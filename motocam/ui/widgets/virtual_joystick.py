@@ -35,17 +35,33 @@ class VirtualJoystick(QWidget):
         self._dragging = False
         self._active = True
         self._compact = False
-        self._set_geometry(DEFAULT_WIDGET_SIZE, DEFAULT_BASE_RADIUS, DEFAULT_KNOB_RADIUS)
+        self._size_scale = 1.0
+        self._apply_geometry()
 
     def set_compact(self, compact: bool) -> None:
         if compact == self._compact:
             return
         self._compact = compact
-        if compact:
-            self._set_geometry(COMPACT_WIDGET_SIZE, COMPACT_BASE_RADIUS, COMPACT_KNOB_RADIUS)
-        else:
-            self._set_geometry(DEFAULT_WIDGET_SIZE, DEFAULT_BASE_RADIUS, DEFAULT_KNOB_RADIUS)
+        self._apply_geometry()
         self.update()
+
+    def set_size_scale(self, scale: float) -> None:
+        """Operator-tunable enlargement of this thumb control (design doc
+        11.1/12.3 glove-friendly sizing) -- see display.controls_scale."""
+        scale = max(0.5, min(3.0, scale))
+        if scale == self._size_scale:
+            return
+        self._size_scale = scale
+        self._apply_geometry()
+        self.update()
+
+    def _apply_geometry(self) -> None:
+        if self._compact:
+            size, base, knob = COMPACT_WIDGET_SIZE, COMPACT_BASE_RADIUS, COMPACT_KNOB_RADIUS
+        else:
+            size, base, knob = DEFAULT_WIDGET_SIZE, DEFAULT_BASE_RADIUS, DEFAULT_KNOB_RADIUS
+        s = self._size_scale
+        self._set_geometry(int(size * s), int(base * s), int(knob * s))
 
     def set_active(self, active: bool) -> None:
         if active == self._active:

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 from motocam.ui.widgets.logo import LogoWidget
 
@@ -15,9 +15,15 @@ class StatusChip(QLabel):
         self._label = label
         self.setProperty("class", "statusChip statusIdle")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumHeight(46)
-        self.setFixedWidth(70)
+        self.setMinimumHeight(40)
+        # Fluid: chips share the bar width equally and grow with the
+        # window instead of a fixed 70px that stayed tiny on a big screen.
+        # A minimum keeps them tappable when the bar is narrow.
+        self.setMinimumWidth(58)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setTextFormat(Qt.TextFormat.RichText)
+        self._state = "idle"
+        self._value = "--"
         self.set_state("idle", "--")
 
         self._blink_timer = QTimer(self)
@@ -34,14 +40,37 @@ class StatusChip(QLabel):
             "bad": "statusBad",
             "idle": "statusIdle",
         }.get(state, "statusIdle")
+        self._state = state
+        self._value = self._value_text(text if text is not None else self._label)
         self.setProperty("class", f"statusChip {css_class}")
-        value = self._value_text(text if text is not None else self._label)
-        self.setText(
-            f"<div style='font-size:9px; font-weight:800; letter-spacing:0; color:#8f98a8;'>{self._label}</div>"
-            f"<div style='font-size:14px; font-weight:950; color:#eef1f6;'>{value}</div>"
-        )
+        self._render()
         self.style().unpolish(self)
         self.style().polish(self)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(event)
+        self._render()  # font sizes track the chip's real height
+
+    def _render(self) -> None:
+        # Text sizes track the chip's real geometry so the bar reads well
+        # at any window size / UI scale. Bounded by BOTH height and width:
+        # a tall-but-narrow chip must shrink its font to the width or the
+        # value string ("SYNTH") clips horizontally.
+        h = max(self.height(), self.minimumHeight())
+        # Subtract the QSS horizontal padding (10px each side, theme.py
+        # .statusChip) so the width budget is the real text area.
+        w = max(self.width() - 24, 24)
+        # ~0.72 px advance per char at this bold weight (measured against
+        # clipping on "SYNTH"/"GIMBAL"); size to the longer of label/value
+        # so neither overflows the chip width.
+        longest = max(len(self._label), len(self._value), 1)
+        width_cap = int(w / (longest * 0.72))
+        label_px = max(8, min(int(h * 0.22), width_cap))
+        value_px = max(11, min(int(h * 0.36), width_cap))
+        self.setText(
+            f"<div style='font-size:{label_px}px; font-weight:800; letter-spacing:0; color:#8f98a8;'>{self._label}</div>"
+            f"<div style='font-size:{value_px}px; font-weight:950; color:#eef1f6;'>{self._value}</div>"
+        )
 
     def set_blinking(self, blinking: bool, text: str = "", on_state: str = "bad", off_state: str = "idle") -> None:
         """Alternates between on_state/off_state every BLINK_INTERVAL_MS --
@@ -113,9 +142,8 @@ class TopBar(QWidget):
             self.cam_chip, self.gimbal_chip, self.gps_chip, self.net_chip,
             self.switcher_chip, self.rec_chip, self.ai_chip, self.fps_chip, self.latency_chip,
         ):
-            layout.addWidget(chip)
-        layout.addStretch(1)
-        layout.addWidget(LogoWidget(height=24))
+            layout.addWidget(chip, stretch=1)  # chips share the width evenly and fill the bar
+        layout.addWidget(LogoWidget(height=30))
 
     def set_unit_id(self, unit_id: str) -> None:
         prefix, _, number = unit_id.rpartition("-")

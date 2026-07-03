@@ -14,8 +14,10 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -64,6 +66,7 @@ class SettingsDialog(QDialog):
     gimbal_apply_requested = pyqtSignal(object)  # gimbal config dict
     ble_scan_requested = pyqtSignal(str)  # preferred BLE name filter
     safety_apply_requested = pyqtSignal(bool, float)  # (ride_lock_enabled, ride_lock_speed_kmh)
+    exit_requested = pyqtSignal()  # quit the whole app (kiosk has no window chrome)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -86,9 +89,31 @@ class SettingsDialog(QDialog):
         scroll.setWidget(content)
         outer_layout.addWidget(scroll)
 
+        footer = QHBoxLayout()
+        # Fullscreen kiosk has no window title bar / close button, so the
+        # only way out of the app lives here. Confirmed so an accidental
+        # tap mid-operation can't kill the live feed.
+        exit_btn = QPushButton("EXIT MOTOCAM")
+        exit_btn.setObjectName("exitButton")
+        exit_btn.clicked.connect(self._confirm_exit)
+        footer.addWidget(exit_btn)
+        footer.addStretch(1)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
-        outer_layout.addWidget(close_btn)
+        footer.addWidget(close_btn)
+        outer_layout.addLayout(footer)
+
+    def _confirm_exit(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Exit MotoCam",
+            "Quit MotoCam?\n\nThis stops the camera control, tracking and the "
+            "link to the control room on this unit.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.exit_requested.emit()
 
     # -- unit identity & control room link (design doc 6.2, 21) ---------------
     def _build_connection_group(self) -> QGroupBox:

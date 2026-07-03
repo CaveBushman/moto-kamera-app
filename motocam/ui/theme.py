@@ -127,6 +127,20 @@ QPushButton#manualOverride:hover {{
     border: 1px solid rgba(255, 160, 160, 180);
 }}
 
+/* Quit button in Settings -- red so it's unmistakably a destructive
+   action, but it lives behind the Settings dialog + a confirm prompt so
+   it can't be hit by accident mid-ride. */
+QPushButton#exitButton {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 #7f1212, stop:1 #5a0d0d);
+    border: 1px solid rgba(255, 120, 120, 130);
+    color: #ffdede;
+}}
+
+QPushButton#exitButton:hover {{
+    border: 1px solid rgba(255, 160, 160, 170);
+}}
+
 /* Frosted glass cards for grouped controls */
 QGroupBox {{
     background-color: rgba(15, 18, 24, 232);

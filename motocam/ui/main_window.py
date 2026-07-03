@@ -10,7 +10,7 @@ from typing import Any
 import cv2
 import numpy as np
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from motocam.ai.ai_engine import AiEngine
 from motocam.ai.hailo_detector import build_detector
@@ -240,6 +240,7 @@ class MainWindow(QMainWindow):
         self._settings.gimbal_apply_requested.connect(self._on_gimbal_apply)
         self._settings.ble_scan_requested.connect(self._on_ble_scan_requested)
         self._settings.safety_apply_requested.connect(self._on_safety_apply)
+        self._settings.exit_requested.connect(self._on_exit_requested)
 
     def _start_timers(self) -> None:
         self._control_timer = QTimer(self)
@@ -658,7 +659,32 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             logger.warning("Failed to save config %s: %s", self._config_path, exc)
 
+    def _on_exit_requested(self) -> None:
+        logger.info("Exit requested from Settings -- shutting down")
+        self._settings.accept()  # close the dialog first
+        self.close()             # triggers closeEvent cleanup, then quit
+
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         self.ptt_engine.stop()
         self.talkback_player.stop()
+        # Stop hardware/timers so nothing keeps the event loop alive after
+        # the window is gone (fullscreen kiosk: closing the window IS quit).
+        # link.stop() is a coroutine -- schedule it on the running loop
+        # best-effort rather than calling it synchronously (which would
+        # never actually run and warns).
+        try:
+            self.video_engine.stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("video stop failed: %s", exc)
+        try:
+            self.gps.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("gps close failed: %s", exc)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.link.stop())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("link stop scheduling failed: %s", exc)
         super().closeEvent(event)
+        QApplication.instance().quit()

@@ -80,6 +80,21 @@ class SettingsDialog(QDialog):
 
         outer_layout = QVBoxLayout(self)
 
+        # Top toolbar: HIDE KEYBOARD lives HERE, at the top, so it's always
+        # reachable above the Pi on-screen keyboard -- which covers the
+        # bottom of the screen and would otherwise hide a footer button
+        # (the very button you need to dismiss the keyboard). Close sits
+        # here too for the same reason.
+        toolbar = QHBoxLayout()
+        hide_kb_btn = QPushButton("⌨  HIDE KEYBOARD")
+        hide_kb_btn.clicked.connect(self.hide_keyboard)
+        toolbar.addWidget(hide_kb_btn)
+        toolbar.addStretch(1)
+        top_close_btn = QPushButton("Close")
+        top_close_btn.clicked.connect(self._on_close)
+        toolbar.addWidget(top_close_btn)
+        outer_layout.addLayout(toolbar)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         content = QWidget()
@@ -103,12 +118,6 @@ class SettingsDialog(QDialog):
         exit_btn.clicked.connect(self._confirm_exit)
         footer.addWidget(exit_btn)
         footer.addStretch(1)
-        # The Raspberry Pi OS on-screen keyboard (squeekboard) pops up on
-        # any text field and won't auto-dismiss on the kiosk, covering the
-        # Apply buttons. This always-visible button forces it away.
-        hide_kb_btn = QPushButton("⌨  HIDE KEYBOARD")
-        hide_kb_btn.clicked.connect(self.hide_keyboard)
-        footer.addWidget(hide_kb_btn)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self._on_close)
         footer.addWidget(close_btn)
@@ -124,6 +133,24 @@ class SettingsDialog(QDialog):
         # on the keyboard/close/exit buttons that already handle it.
         for button in self.findChildren(QPushButton):
             button.clicked.connect(self.hide_keyboard)
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().showEvent(event)
+        # Fit the dialog to the screen and pin it to the top edge: the Pi
+        # on-screen keyboard eats the bottom third, so a tall dialog runs
+        # its footer off-screen behind the keyboard. Anchored at the top,
+        # the toolbar (HIDE KEYBOARD / Close) is always reachable and the
+        # scroll area handles the rest.
+        screen = self.screen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        max_h = int(avail.height() * 0.95)
+        if self.height() > max_h:
+            self.resize(self.width(), max_h)
+        # top-centered
+        x = avail.x() + (avail.width() - self.width()) // 2
+        self.move(max(avail.x(), x), avail.y() + 8)
 
     def hide_keyboard(self) -> None:
         """Dismiss the OS on-screen keyboard: drop input focus, ask the Qt

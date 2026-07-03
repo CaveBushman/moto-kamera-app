@@ -370,19 +370,15 @@ class PreviewView(QFrame):
         self.zoom_rocker.move(zoom_x, zoom_y)
 
         # Exposure rocker mirrors the zoom rocker on the PTT (left) side:
-        # centered above the PTT button, or nudged to its right if the
-        # window is too short to stack it above.
+        # left-anchored over the PTT button, and pinned to the SAME height as
+        # the zoom rocker so the two rockers read as a matched pair (the PTT
+        # button is shorter than the joystick, so keying off it alone would
+        # sit the exposure rocker too low).
         exp = self.exposure_rocker
         # Center over the PTT, but the rocker is wider than the PTT button so
         # a true center would run off the left edge -- clamp the left margin.
         exp_x = max(PTT_MARGIN, self.ptt_button.x() + (self.ptt_button.width() - exp.width()) // 2)
-        exp_above_y = self.ptt_button.y() - exp.height() - ZOOM_JOYSTICK_GAP
-        if exp_above_y >= min_control_y:
-            exp_y = exp_above_y
-        else:
-            exp_x = self.ptt_button.x() + self.ptt_button.width() + ZOOM_JOYSTICK_GAP
-            exp_y = max(min_control_y, self.ptt_button.y())
-        exp.move(exp_x, exp_y)
+        exp.move(exp_x, zoom_y)
         self._position_hud(hud_top, hud_height)
 
     def _hud_top_margin(self) -> int:

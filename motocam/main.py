@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -134,6 +135,18 @@ def main() -> int:
     install_crash_guard(logging.getLogger("motocam"))
     logger.info("Starting MotoCam")
 
+    # Global UI scale: the whole app was sized in logical pixels on a
+    # desktop; on the real Pi touchscreen everything reads too small for
+    # gloved operation (design doc 11.1). QT_SCALE_FACTOR multiplies the
+    # ENTIRE UI -- fonts, buttons, chips, spacing -- uniformly, so one
+    # config value fixes "everything is small" without touching any
+    # widget. Must be set before QApplication is constructed.
+    display_cfg = cfg.get("display", {})
+    ui_scale = float(display_cfg.get("ui_scale", 1.0))
+    if ui_scale != 1.0 and "QT_SCALE_FACTOR" not in os.environ:
+        os.environ["QT_SCALE_FACTOR"] = f"{ui_scale:.3f}"
+        logger.info("UI scale factor set to %.2f", ui_scale)
+
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLESHEET)
     splash = create_splash()
@@ -164,7 +177,13 @@ def main() -> int:
         config=cfg,
         config_path=config_path,
     )
-    window.show()
+    # Fullscreen on the kiosk touchscreen (no title bar / desktop taskbar
+    # eating space); windowed on a dev desktop. Config-driven so the Mac
+    # stays windowed.
+    if bool(display_cfg.get("fullscreen", False)):
+        window.showFullScreen()
+    else:
+        window.show()
     QTimer.singleShot(1200, lambda: splash.finish(window))
 
     gps.open()

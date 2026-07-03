@@ -40,6 +40,10 @@ telemetry:
 audio:
   input_device: null
   output_device: null
+display:
+  ui_scale: 1.5        # multiplies the WHOLE UI (fonts/buttons/chips). 1.0 = desktop;
+                       # bump to 1.5-2.0 on the Pi touchscreen for glove-friendly sizes
+  fullscreen: true     # true on the kiosk touchscreen; false for a windowed dev desktop
 safety:
   ride_lock_enabled: false
   ride_lock_speed_kmh: 15

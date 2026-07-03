@@ -166,25 +166,44 @@ class SettingsDialog(QDialog):
 
     @staticmethod
     def _squeekboard_hide() -> None:
+        """Tell Raspberry Pi OS's squeekboard to hide via its DBus method
+        SetVisible(false).
+
+        This MUST be a method call, not a property write: squeekboard's
+        `Visible` property is read-only, so `busctl set-property ... Visible`
+        errors out -- which is exactly why the button did nothing (busctl is
+        found before dbus-send, so the working fallback was never reached).
+        We now issue the SetVisible method on whichever tool exists, and if
+        the first one errors we fall through to the next."""
         import shutil
         import subprocess
         import sys
 
         if not sys.platform.startswith("linux"):
             return
-        tool = shutil.which("busctl") or shutil.which("dbus-send")
-        if tool is None:
-            return
-        try:
-            if tool.endswith("busctl"):
-                cmd = ["busctl", "--user", "set-property", "sm.puri.OSK0",
-                       "/sm/puri/OSK0", "sm.puri.OSK0", "Visible", "b", "false"]
-            else:
-                cmd = ["dbus-send", "--type=method_call", "--dest=sm.puri.OSK0",
-                       "/sm/puri/OSK0", "sm.puri.OSK0.SetVisible", "boolean:false"]
-            subprocess.run(cmd, timeout=1.0, capture_output=True, check=False)
-        except Exception as exc:  # noqa: BLE001 -- absent squeekboard/dbus must be silent
-            logger.debug("squeekboard hide via dbus failed: %s", exc)
+        attempts = []
+        if shutil.which("busctl"):
+            attempts.append([
+                "busctl", "--user", "call", "sm.puri.OSK0",
+                "/sm/puri/OSK0", "sm.puri.OSK0", "SetVisible", "b", "false",
+            ])
+        if shutil.which("dbus-send"):
+            attempts.append([
+                "dbus-send", "--type=method_call", "--dest=sm.puri.OSK0",
+                "/sm/puri/OSK0", "sm.puri.OSK0.SetVisible", "boolean:false",
+            ])
+        for cmd in attempts:
+            try:
+                result = subprocess.run(cmd, timeout=1.0, capture_output=True, check=False)
+            except Exception as exc:  # noqa: BLE001 -- absent dbus tool must stay silent
+                logger.debug("squeekboard hide via %s failed: %s", cmd[0], exc)
+                continue
+            if result.returncode == 0:
+                return
+            logger.debug(
+                "squeekboard hide via %s returned %d: %s",
+                cmd[0], result.returncode, result.stderr.decode(errors="replace").strip(),
+            )
 
     def _on_close(self) -> None:
         self.hide_keyboard()

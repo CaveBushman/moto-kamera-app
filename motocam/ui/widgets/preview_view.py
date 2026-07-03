@@ -10,6 +10,7 @@ from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from motocam.ui.widgets.exposure_rocker import ExposureRocker
 from motocam.ui.widgets.ptt_button import PTTButton
 from motocam.ui.widgets.virtual_joystick import VirtualJoystick
 from motocam.ui.widgets.zoom_rocker import ZoomRocker
@@ -49,6 +50,9 @@ class PreviewView(QFrame):
 
         self.zoom_rocker = ZoomRocker(self)
         self.zoom_rocker.raise_()
+
+        self.exposure_rocker = ExposureRocker(self)
+        self.exposure_rocker.raise_()
 
         self.ptt_button = PTTButton(self)
         self.ptt_button.raise_()
@@ -138,6 +142,7 @@ class PreviewView(QFrame):
         for glove operation, then re-place them for the new sizes."""
         self.joystick.set_size_scale(scale)
         self.zoom_rocker.set_size_scale(scale)
+        self.exposure_rocker.set_size_scale(scale)
         self.ptt_button.set_size_scale(scale)
         self._reposition_layout()
 
@@ -171,6 +176,9 @@ class PreviewView(QFrame):
         self._ride_locked = locked
         self.settings_button.setEnabled(not locked)
         self.hud_toggle.setEnabled(not locked)
+        # The exposure rocker IS an ISO tap -- exactly what ride-lock guards
+        # against -- so it grays out with the rest. Zoom stays live.
+        self.exposure_rocker.set_active(not locked)
         if locked and self.hud_toggle.isChecked():
             self.hud_toggle.setChecked(False)  # also collapses the HUD
         if self.hud_widget is not None:
@@ -339,6 +347,7 @@ class PreviewView(QFrame):
         compact_controls = control_zone_height < 330 or self.width() < 760
         self.joystick.set_compact(compact_controls)
         self.zoom_rocker.set_compact(compact_controls)
+        self.exposure_rocker.set_compact(compact_controls)
         self.ptt_button.set_compact(compact_controls)
 
         min_control_y = hud_bottom + CONTROL_HUD_GAP if self.hud_widget else 0
@@ -359,6 +368,21 @@ class PreviewView(QFrame):
             zoom_x = max(PTT_MARGIN, self.joystick.x() - self.zoom_rocker.width() - ZOOM_JOYSTICK_GAP)
             zoom_y = max(min_control_y, self.joystick.y())
         self.zoom_rocker.move(zoom_x, zoom_y)
+
+        # Exposure rocker mirrors the zoom rocker on the PTT (left) side:
+        # centered above the PTT button, or nudged to its right if the
+        # window is too short to stack it above.
+        exp = self.exposure_rocker
+        # Center over the PTT, but the rocker is wider than the PTT button so
+        # a true center would run off the left edge -- clamp the left margin.
+        exp_x = max(PTT_MARGIN, self.ptt_button.x() + (self.ptt_button.width() - exp.width()) // 2)
+        exp_above_y = self.ptt_button.y() - exp.height() - ZOOM_JOYSTICK_GAP
+        if exp_above_y >= min_control_y:
+            exp_y = exp_above_y
+        else:
+            exp_x = self.ptt_button.x() + self.ptt_button.width() + ZOOM_JOYSTICK_GAP
+            exp_y = max(min_control_y, self.ptt_button.y())
+        exp.move(exp_x, exp_y)
         self._position_hud(hud_top, hud_height)
 
     def _hud_top_margin(self) -> int:

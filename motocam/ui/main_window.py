@@ -39,7 +39,7 @@ from motocam.ui.widgets.camera_panel import CameraPanel
 from motocam.ui.widgets.gimbal_panel import GimbalPanel
 from motocam.ui.widgets.mode_bar import ModeBar
 from motocam.ui.widgets.preview_view import PreviewView
-from motocam.ui.widgets.settings_dialog import SettingsDialog
+from motocam.ui.widgets.settings_dialog import ISO_VALUES, SettingsDialog
 from motocam.ui.widgets.stage_banner import StageBanner
 from motocam.ui.widgets.top_bar import TopBar
 from motocam.video.video_engine import VideoEngine
@@ -213,6 +213,7 @@ class MainWindow(QMainWindow):
         self.preview.joystick.released.connect(self._on_manual_drag_end)
         self.preview.zoom_rocker.moved.connect(self._on_zoom_drag)
         self.preview.zoom_rocker.released.connect(self._on_zoom_drag_end)
+        self.preview.exposure_rocker.stepped.connect(self._on_exposure_step)
         self.preview.ptt_button.pressed.connect(self._on_ptt_pressed)
         self.preview.ptt_button.released.connect(self._on_ptt_released)
         self.ptt_engine.audio_chunk.connect(self._on_ptt_audio_chunk)
@@ -354,6 +355,26 @@ class MainWindow(QMainWindow):
     def _on_zoom_drag_end(self) -> None:
         asyncio.ensure_future(self.camera.set_zoom_speed(0.0))
 
+    def _on_exposure_step(self, direction: int) -> None:
+        """One flick of the exposure rocker = one ISO stop. Steps from the
+        camera's current ISO through the standard stops and clamps at the
+        ends; if the camera hasn't reported an ISO yet, start from a sane
+        mid value so the first flick still does something."""
+        current = self.camera.state.iso
+        if current in ISO_VALUES:
+            index = ISO_VALUES.index(current)
+        elif current is not None:
+            # snap an off-list value to the nearest standard stop
+            index = min(range(len(ISO_VALUES)), key=lambda i: abs(ISO_VALUES[i] - current))
+        else:
+            index = ISO_VALUES.index(800) if 800 in ISO_VALUES else len(ISO_VALUES) // 2
+        new_index = max(0, min(len(ISO_VALUES) - 1, index + direction))
+        new_iso = ISO_VALUES[new_index]
+        # reflect immediately so the rocker/HUD don't wait a refresh tick
+        self.camera.state.iso = new_iso
+        self.preview.exposure_rocker.set_value_text(str(new_iso))
+        asyncio.ensure_future(self.camera.set_iso(new_iso))
+
     def _sync_joystick_active(self) -> None:
         self.preview.joystick.set_active(self.gimbal.mode == OperatingMode.MANUAL)
 
@@ -453,6 +474,9 @@ class MainWindow(QMainWindow):
         self.gimbal_panel.update_orientation(self.gimbal.pan_deg, self.gimbal.tilt_deg, self.gimbal.roll_deg)
         self.gimbal_panel.set_connected(self.gimbal.connected)
         self.camera_panel.update_state(self.camera.state)
+        self.preview.exposure_rocker.set_value_text(
+            str(self.camera.state.iso) if self.camera.state.iso is not None else "--"
+        )
         self.top_bar.gimbal_chip.set_state("ok" if self.gimbal.connected else "bad", "OK" if self.gimbal.connected else "DOWN")
         if self.camera.state.recording:
             self.top_bar.rec_chip.set_blinking(True, text="● REC")

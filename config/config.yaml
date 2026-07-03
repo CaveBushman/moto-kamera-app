@@ -1,0 +1,47 @@
+unit_id: moto-1
+video:
+  device: 1
+  width: 1920
+  height: 1080
+  fps: 30
+ai:
+  type: hailo             # "hailo" = real AI HAT+ inference; anything else = NullDetector (tap-to-select only)
+  model: /opt/motorcam/models/cyclist_yolo.hef   # compiled .hef for the Hailo-8 (26 TOPS)
+  confidence: 0.35
+  target_class: cyclist
+  # labels: class order of the compiled model. Omit for a stock COCO
+  # YOLOv8/v11 HEF (person/bicycle/car/motorcycle/...). A custom
+  # cyclist-trained model lists its own classes here, e.g. [cyclist].
+  labels: null
+gimbal:
+  type: dji_rs4_pro
+  connection: mock
+  ble_name: RS 4 Pro
+  ble_address: null
+  ble_service_uuid: null
+  ble_tx_char_uuid: null
+  ble_rx_char_uuid: null
+  can_channel: can0
+  can_bitrate: 1000000
+  uart_device: /dev/ttyAMA0
+  uart_baudrate: 115200
+  max_pan_speed: 20
+  max_tilt_speed: 12
+camera:
+  type: blackmagic_pyxis
+  ip: 192.168.9.20
+  port: 9993
+  rest_port: 80
+gps:
+  device: null
+  baudrate: 9600
+telemetry:
+  control_room_url: ws://127.0.0.1:8765
+audio:
+  input_device: null
+  output_device: null
+safety:
+  ride_lock_enabled: false
+  ride_lock_speed_kmh: 15
+logging:
+  dir: logs

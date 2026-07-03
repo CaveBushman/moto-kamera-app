@@ -1,0 +1,23 @@
+PyQt6>=6.11
+qasync>=0.27
+opencv-contrib-python-headless>=4.9
+numpy>=1.26
+websockets>=12.0
+PyYAML>=6.0
+pyserial>=3.5
+pynmea2>=1.19
+psutil>=5.9
+bleak>=0.22
+sounddevice>=0.5
+
+# Raspberry Pi only -- NOT installed via this file (no macOS/PyPI wheels).
+# The app import-guards both and falls back cleanly when absent:
+#   hailo_platform  -- AI HAT+ inference (ships with Hailo's apt packages
+#                      on Raspberry Pi OS; see raspberrypi.com/documentation
+#                      /computers/ai.html). Without it: NullDetector.
+#   python-can      -- DJI R SDK over a CAN adapter (pip3 install python-can).
+#                      Only needed for gimbal.connection: can. BLE/UART/mock
+#                      don't need it.
+
+# dev-only
+pytest>=8.0

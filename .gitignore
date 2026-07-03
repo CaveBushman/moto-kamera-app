@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime
+logs/
+*.log
+
+# OS
+.DS_Store
+
+# Local config with real device addresses/IPs may be sensitive -- commit
+# config/config.yaml as the shared template, ignore machine-local copies.
+config/config.local.yaml

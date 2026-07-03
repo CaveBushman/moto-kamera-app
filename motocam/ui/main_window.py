@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from motocam.ai.hailo_detector import build_detector
 from motocam.audio.ptt_engine import SAMPLE_RATE, PttEngine
 from motocam.audio.talkback_player import TalkbackPlayer
 from motocam.camera.base import CameraController
+from motocam.core.config import save_config
 from motocam.core.protocol import (
     AiTelemetry,
     CameraTelemetry,
@@ -24,10 +26,11 @@ from motocam.core.protocol import (
     MessageType,
     NetworkTelemetry,
     OperatingMode,
+    SourceTelemetry,
     Telemetry,
     TargetState,
 )
-from motocam.core.config import save_config
+from motocam.core.telemetry_sources import is_fallback_source, source_value_display
 from motocam.gimbal.base import GimbalController
 from motocam.gimbal.factory import build_gimbal_backend
 from motocam.gps.gps_manager import GpsManager
@@ -43,6 +46,7 @@ from motocam.ui.widgets.settings_dialog import ISO_VALUES, SettingsDialog
 from motocam.ui.widgets.stage_banner import StageBanner
 from motocam.ui.widgets.top_bar import TopBar
 from motocam.video.video_engine import VideoEngine
+from motocam.video.preview_relay import preview_interval_s, preview_jpeg_quality, scaled_preview_size
 from motocam.watchdog.health import HealthMonitor
 
 logger = logging.getLogger("motocam.ui")
@@ -88,8 +92,13 @@ class MainWindow(QMainWindow):
         self._config_path = Path(config_path) if config_path is not None else None
         audio_cfg = self._config.get("audio") or {}
         safety_cfg = self._config.get("safety") or {}
+        preview_cfg = self._config.get("preview_relay") or {}
         self._ride_lock_enabled = bool(safety_cfg.get("ride_lock_enabled", False))
         self._ride_lock_speed_kmh = float(safety_cfg.get("ride_lock_speed_kmh", 15.0))
+        self._preview_interval_s = preview_interval_s(preview_cfg.get("fps", 5))
+        self._preview_jpeg_quality = preview_jpeg_quality(preview_cfg.get("jpeg_quality", 55))
+        self._preview_max_width = preview_cfg.get("max_width", 960)
+        self._last_preview_sent_at = 0.0
 
         self.tracker = TrackingEngine()
         ai_cfg = self._config.get("ai", {})
@@ -293,21 +302,37 @@ class MainWindow(QMainWindow):
         self.preview.set_bbox(self.tracker.bbox, self.tracker.state.value)
         self.preview.update_frame(frame)
 
-        chip_state = STATE_TO_CHIP.get(self.tracker.state.value, "idle")
-        self.top_bar.ai_chip.set_state(chip_state, f"AI {self.tracker.state.value.upper()}")
+        if is_fallback_source(self.ai_engine.source):
+            self.top_bar.ai_chip.set_state("warn", f"AI {source_value_display(self.ai_engine.source)}")
+        else:
+            chip_state = STATE_TO_CHIP.get(self.tracker.state.value, "idle")
+            self.top_bar.ai_chip.set_state(chip_state, f"AI {self.tracker.state.value.upper()}")
         self.preview.set_tracking_active(self.tracker.state != TargetState.IDLE)
 
-        h, w = frame.shape[:2]
-        self._preview_resolution = f"{w}x{h}"
-
         if self._preview_streaming:
-            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            now = time.monotonic()
+            if now - self._last_preview_sent_at < self._preview_interval_s:
+                return
+            self._last_preview_sent_at = now
+            relay_frame = self._make_preview_relay_frame(frame)
+            relay_h, relay_w = relay_frame.shape[:2]
+            ok, buf = cv2.imencode(
+                ".jpg", relay_frame, [cv2.IMWRITE_JPEG_QUALITY, self._preview_jpeg_quality]
+            )
             if ok:
                 self.link.send_preview_frame(buf.tobytes())
                 # Real measured bandwidth of the low-fps preview relay to
                 # the control room -- not the PYXIS's own recording bitrate,
                 # see CameraTelemetry.preview_bitrate_kbps docstring.
                 self._preview_bytes_accum += buf.nbytes
+                self._preview_resolution = f"{relay_w}x{relay_h}"
+
+    def _make_preview_relay_frame(self, frame: np.ndarray) -> np.ndarray:
+        h, w = frame.shape[:2]
+        target_w, target_h = scaled_preview_size(w, h, self._preview_max_width)
+        if (target_w, target_h) == (w, h):
+            return frame
+        return cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
     def _pick_target_detection(self, detections):
         """Highest-confidence detection whose class matches the configured
@@ -456,7 +481,10 @@ class MainWindow(QMainWindow):
     # -- GPS / telemetry / health --------------------------------------------
     def _gps_tick(self) -> None:
         fix = self.gps.poll()
-        self.top_bar.gps_chip.set_state("ok" if fix.fix else "warn", "FIX" if fix.fix else "NO FIX")
+        if is_fallback_source(self.gps.source):
+            self.top_bar.gps_chip.set_state("warn", f"GPS {source_value_display(self.gps.source)}")
+        else:
+            self.top_bar.gps_chip.set_state("ok" if fix.fix else "warn", "FIX" if fix.fix else "NO FIX")
         locked = (
             self._ride_lock_enabled
             and fix.fix
@@ -477,7 +505,12 @@ class MainWindow(QMainWindow):
         self.preview.exposure_rocker.set_value_text(
             str(self.camera.state.iso) if self.camera.state.iso is not None else "--"
         )
-        self.top_bar.gimbal_chip.set_state("ok" if self.gimbal.connected else "bad", "OK" if self.gimbal.connected else "DOWN")
+        if is_fallback_source(self.gimbal.source):
+            self.top_bar.gimbal_chip.set_state("warn", f"GIMBAL {source_value_display(self.gimbal.source)}")
+        else:
+            self.top_bar.gimbal_chip.set_state(
+                "ok" if self.gimbal.connected else "bad", "OK" if self.gimbal.connected else "DOWN"
+            )
         if self.camera.state.recording:
             self.top_bar.rec_chip.set_blinking(True, text="● REC")
         else:
@@ -509,10 +542,18 @@ class MainWindow(QMainWindow):
                 iso=self.camera.state.iso, white_balance=self.camera.state.white_balance,
                 shutter=self.camera.state.shutter, iris=self.camera.state.iris, fps=self.camera.state.fps,
                 media_remaining_min=self.camera.state.media_remaining_min, battery_pct=self.camera.state.battery_pct,
-                preview_resolution=self._preview_resolution, preview_bitrate_kbps=self._preview_bitrate_kbps,
+                preview_resolution=self._preview_resolution if self._preview_streaming else None,
+                preview_bitrate_kbps=self._preview_bitrate_kbps,
             ),
             network=NetworkTelemetry(link_up=self.link.connected),
             system=sys_stats,
+            sources=SourceTelemetry(
+                gps=self.gps.source,
+                video=self.video_engine.source,
+                camera=self.camera.source,
+                gimbal=self.gimbal.source,
+                ai=self.ai_engine.source,
+            ),
         )
         self.link.send_telemetry(telemetry)
 
@@ -544,6 +585,9 @@ class MainWindow(QMainWindow):
                 self._on_home()
         elif msg_type == MessageType.REQUEST_PREVIEW.value:
             self._preview_streaming = bool(payload.get("enabled", False))
+            self._last_preview_sent_at = 0.0
+            if not self._preview_streaming:
+                self._preview_resolution = None
             self.preview.set_link_state(self.link.connected, self._preview_streaming)
         elif msg_type == MessageType.STAGE_INFO.value:
             self.stage_banner.set_stage(

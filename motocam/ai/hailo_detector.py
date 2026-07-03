@@ -145,6 +145,7 @@ class HailoDetector:
     """YOLO inference on the Hailo-8 AI HAT+. Raises RuntimeError from the
     constructor if the runtime/HEF isn't usable, so callers can fall back
     to NullDetector cleanly (see build_detector)."""
+    source = "hailo"
 
     def __init__(self, hef_path: str, labels: list[str] | None = None, min_confidence: float = 0.05):
         if not HAILO_AVAILABLE:

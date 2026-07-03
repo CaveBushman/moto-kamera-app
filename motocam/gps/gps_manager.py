@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from pathlib import Path
 
 import pynmea2
 import serial
@@ -17,6 +18,13 @@ import serial
 from motocam.core.protocol import GpsTelemetry
 
 logger = logging.getLogger("motocam.gps")
+AUTO_DEVICE = "auto"
+AUTO_PATTERNS = (
+    "/dev/serial/by-id/*",
+    "/dev/ttyACM*",
+    "/dev/ttyUSB*",
+)
+NMEA_PREFIXES = ("$GP", "$GN", "$GL", "$GA", "$GB", "$BD", "$GQ")
 
 
 class GpsManager:
@@ -24,7 +32,7 @@ class GpsManager:
         self.device = device
         self.baudrate = baudrate
         self._serial: serial.Serial | None = None
-        self._simulated = device is None
+        self._simulated = device is None or str(device).lower() == AUTO_DEVICE
         self._sim_t = 0.0
         self._sim_origin = (50.0755, 14.4378)  # Prague, arbitrary default
         self.state = GpsTelemetry()
@@ -34,6 +42,13 @@ class GpsManager:
             self._simulated = True
             logger.warning("No GPS device configured, using simulated fix")
             return
+        if str(self.device).lower() == AUTO_DEVICE:
+            detected = self._detect_device()
+            if detected is None:
+                self._simulated = True
+                logger.warning("No NMEA GPS device detected, using simulated fix")
+                return
+            self.device = detected
         try:
             self._serial = serial.Serial(self.device, self.baudrate, timeout=0.2)
             self._simulated = False
@@ -47,6 +62,10 @@ class GpsManager:
         if self._serial is not None:
             self._serial.close()
             self._serial = None
+
+    @property
+    def source(self) -> str:
+        return "simulated" if self._simulated else "real"
 
     def poll(self) -> GpsTelemetry:
         if self._simulated:
@@ -87,6 +106,36 @@ class GpsManager:
         elif isinstance(msg, pynmea2.types.talker.VTG):
             if msg.spd_over_grnd_kmph is not None:
                 self.state.speed_kmh = float(msg.spd_over_grnd_kmph)
+
+    def _detect_device(self) -> str | None:
+        for device in self._candidate_devices():
+            if self._looks_like_nmea(device):
+                logger.info("Auto-detected GPS NMEA device on %s", device)
+                return device
+        return None
+
+    def _candidate_devices(self) -> list[str]:
+        seen: set[str] = set()
+        devices: list[str] = []
+        for pattern in AUTO_PATTERNS:
+            for path in sorted(Path("/").glob(pattern.lstrip("/"))):
+                text = str(path)
+                if text not in seen:
+                    seen.add(text)
+                    devices.append(text)
+        return devices
+
+    def _looks_like_nmea(self, device: str) -> bool:
+        try:
+            with serial.Serial(device, self.baudrate, timeout=0.2) as probe:
+                deadline = time.monotonic() + 1.5
+                while time.monotonic() < deadline:
+                    line = probe.readline().decode("ascii", errors="ignore").strip()
+                    if line.startswith(NMEA_PREFIXES):
+                        return True
+        except (OSError, serial.SerialException):
+            return False
+        return False
 
     def _simulate(self) -> GpsTelemetry:
         self._sim_t += 0.5

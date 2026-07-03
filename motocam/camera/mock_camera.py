@@ -7,6 +7,8 @@ from motocam.camera.base import CameraBackend, CameraState
 
 
 class MockCameraBackend(CameraBackend):
+    source = "mock"
+
     def __init__(self):
         self._connected = False
         self._state = CameraState(

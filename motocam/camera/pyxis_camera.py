@@ -86,6 +86,8 @@ def parse_iris(iris: str) -> dict | None:
 
 
 class PyxisCameraBackend(CameraBackend):
+    source = "pyxis-rest"
+
     def __init__(self, ip: str, port: int = 80):
         self.ip = ip
         self.port = port

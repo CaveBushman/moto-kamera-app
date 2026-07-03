@@ -440,6 +440,11 @@ class DjiRs4ProBackend(GimbalBackend):
     def connected(self) -> bool:
         return self._connected
 
+    @property
+    def source(self) -> str:
+        label = getattr(self.transport, "label", self.transport.__class__.__name__)
+        return f"dji-rsdk-{str(label).lower()}"
+
     async def connect(self) -> None:
         if self._connected or self._connect_lock.locked():
             return

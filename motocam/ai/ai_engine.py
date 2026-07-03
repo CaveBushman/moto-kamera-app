@@ -42,6 +42,7 @@ class Detector(Protocol):
 
 class NullDetector:
     """Placeholder used until a HailoDetector is implemented for the AI HAT+."""
+    source = "null"
 
     def __init__(self):
         self._warned = False
@@ -63,6 +64,10 @@ class AiEngine:
         self.target_class = target_class
         self.confidence = confidence
         self.enabled = False
+
+    @property
+    def source(self) -> str:
+        return str(getattr(self.detector, "source", self.detector.__class__.__name__))
 
     def process(self, frame: np.ndarray) -> list[Detection]:
         if not self.enabled:

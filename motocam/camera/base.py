@@ -69,6 +69,10 @@ class CameraController:
     def connected(self) -> bool:
         return self.backend.connected
 
+    @property
+    def source(self) -> str:
+        return str(getattr(self.backend, "source", self.backend.__class__.__name__))
+
     async def connect(self) -> None:
         await self.backend.connect()
 

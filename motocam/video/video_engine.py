@@ -68,6 +68,10 @@ class VideoEngine(QObject):
     def device(self) -> str | int:
         return self._device
 
+    @property
+    def source(self) -> str:
+        return "synthetic" if self._synthetic else "real"
+
     def _open_capture(self) -> None:
         cap = cv2.VideoCapture(self._device)
         if cap.isOpened():

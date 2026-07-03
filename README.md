@@ -62,8 +62,9 @@ bidirectional link to the control room.
   publish BLE GATT UUIDs, so BLE supports Settings -> GIMBAL CONTROL ->
   SCAN BLE DEVICES, best-effort write/notify auto-discovery, plus
   explicit service/write/notify UUID fields in Settings/config for the
-  first real-hardware pairing. `connection: mock` (default) keeps the
-  simulated gimbal for development. `python-can` is required only on the
+  first real-hardware pairing. The shipped config defaults to BLE for
+  Raspberry Pi field use; `connection: mock` keeps the simulated gimbal
+  for development. `python-can` is required only on the
   Pi (`pip3 install python-can`); `bleak` is used for BLE and is already
   in `requirements.txt`.
 
@@ -119,6 +120,21 @@ Beyond MVP1, also implemented:
 - **Video source selector** (Settings -> Video Source): lists detected
   UVC/V4L2 capture devices and hot-swaps `VideoEngine`'s device at runtime
   (`video/devices.py`, `VideoEngine.set_device`), no restart needed.
+- **Preview relay bandwidth cap** (`config/config.yaml -> preview_relay`):
+  the dashboard JPEG preview is downscaled and rate-limited separately
+  from the PYXIS SRT/program path, so weak uplinks are not consumed by
+  control-room thumbnails.
+- **Telemetry source reporting**: every telemetry packet now carries
+  whether GPS/video/camera/gimbal/AI is real hardware or fallback
+  (`GPS REAL/SIMULATED`, `VID REAL/SYNTHETIC`, `GMB DJI-RSDK-BLE/MOCK`,
+  etc.). The control room displays this directly, so field testing on
+  the Pi cannot accidentally mistake a simulated subsystem for real data.
+  The rider top bar also marks fallback sources as warnings (`GPS SIM`,
+  `GIMBAL MOCK`, `CAM SYNTH`, `AI NULL`) instead of letting them look
+  like normal ready states.
+- **GPS auto-detect**: `gps.device: auto` scans common USB serial paths
+  and only accepts a port after seeing an NMEA sentence; otherwise it
+  falls back to simulated GPS with the source marked `SIMULATED`.
 - **Ride-safe lockout** (Settings -> Safety, off by default): above a
   configurable GPS speed, SETTINGS and the CAM/GIMBAL HUD gray out so a
   gloved thumb isn't tempted into fiddly ISO/shutter/lens taps while

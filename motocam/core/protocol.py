@@ -119,6 +119,15 @@ class SystemTelemetry:
 
 
 @dataclass
+class SourceTelemetry:
+    gps: str = "unknown"
+    video: str = "unknown"
+    camera: str = "unknown"
+    gimbal: str = "unknown"
+    ai: str = "unknown"
+
+
+@dataclass
 class StageInfo:
     """Race stage identity, set once by the director and broadcast to every
     connected unit (design doc has no dedicated section for this -- it's a
@@ -150,6 +159,7 @@ class Telemetry:
     camera: CameraTelemetry = field(default_factory=CameraTelemetry)
     network: NetworkTelemetry = field(default_factory=NetworkTelemetry)
     system: SystemTelemetry = field(default_factory=SystemTelemetry)
+    sources: SourceTelemetry = field(default_factory=SourceTelemetry)
 
 
 @dataclass
@@ -186,3 +196,15 @@ def parse_stage_info(payload: dict[str, Any]) -> StageInfo:
 def parse_switcher_state(payload: dict[str, Any]) -> SwitcherState:
     allowed = ("preview_unit", "live_unit", "preview_input", "live_input")
     return SwitcherState(**{k: v for k, v in payload.items() if k in allowed})
+
+
+def parse_telemetry(payload: dict[str, Any]) -> Telemetry:
+    return Telemetry(
+        gps=GpsTelemetry(**payload.get("gps", {})),
+        ai=AiTelemetry(**payload.get("ai", {})),
+        gimbal=GimbalTelemetry(**payload.get("gimbal", {})),
+        camera=CameraTelemetry(**payload.get("camera", {})),
+        network=NetworkTelemetry(**payload.get("network", {})),
+        system=SystemTelemetry(**payload.get("system", {})),
+        sources=SourceTelemetry(**payload.get("sources", {})),
+    )

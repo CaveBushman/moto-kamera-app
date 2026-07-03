@@ -12,6 +12,8 @@ from motocam.gimbal.base import GimbalBackend
 
 
 class MockGimbalBackend(GimbalBackend):
+    source = "mock"
+
     def __init__(self):
         self._connected = False
         self._pan = 0.0

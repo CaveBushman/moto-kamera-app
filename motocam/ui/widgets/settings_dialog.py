@@ -6,7 +6,10 @@ that's adjustable in the field fits on one scrollable-free screen.
 """
 from __future__ import annotations
 
+import logging
+
 from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -27,6 +30,8 @@ from PyQt6.QtWidgets import (
 
 from motocam.audio.devices import list_audio_devices
 from motocam.video.devices import list_video_devices
+
+logger = logging.getLogger("motocam.ui.settings")
 
 ISO_VALUES = [100, 200, 400, 800, 1600, 3200, 6400]
 WB_VALUES = [2800, 3200, 4300, 5000, 5600, 6500, 7500]
@@ -98,10 +103,65 @@ class SettingsDialog(QDialog):
         exit_btn.clicked.connect(self._confirm_exit)
         footer.addWidget(exit_btn)
         footer.addStretch(1)
+        # The Raspberry Pi OS on-screen keyboard (squeekboard) pops up on
+        # any text field and won't auto-dismiss on the kiosk, covering the
+        # Apply buttons. This always-visible button forces it away.
+        hide_kb_btn = QPushButton("⌨  HIDE KEYBOARD")
+        hide_kb_btn.clicked.connect(self.hide_keyboard)
+        footer.addWidget(hide_kb_btn)
         close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
+        close_btn.clicked.connect(self._on_close)
         footer.addWidget(close_btn)
         outer_layout.addLayout(footer)
+
+        # Pressing Enter/Return in any field dismisses the OS keyboard too
+        # (the squeekboard ↵ key sends returnPressed here).
+        for line_edit in self.findChildren(QLineEdit):
+            line_edit.returnPressed.connect(self.hide_keyboard)
+        # Any button tap (APPLY, RESCAN, ...) also dismisses it -- the Pi
+        # squeekboard doesn't hide on focus-out on its own, so a tap that
+        # moves focus off a field otherwise leaves it stuck up. Idempotent
+        # on the keyboard/close/exit buttons that already handle it.
+        for button in self.findChildren(QPushButton):
+            button.clicked.connect(self.hide_keyboard)
+
+    def hide_keyboard(self) -> None:
+        """Dismiss the OS on-screen keyboard: drop input focus, ask the Qt
+        platform input method to hide (works when Qt drives the Wayland
+        text-input), and as a belt-and-braces fallback tell Raspberry Pi
+        OS's squeekboard directly over DBus (works even when Qt runs under
+        XWayland and never touched the Wayland text-input)."""
+        widget = self.focusWidget()
+        if widget is not None:
+            widget.clearFocus()
+        QGuiApplication.inputMethod().hide()
+        self._squeekboard_hide()
+
+    @staticmethod
+    def _squeekboard_hide() -> None:
+        import shutil
+        import subprocess
+        import sys
+
+        if not sys.platform.startswith("linux"):
+            return
+        tool = shutil.which("busctl") or shutil.which("dbus-send")
+        if tool is None:
+            return
+        try:
+            if tool.endswith("busctl"):
+                cmd = ["busctl", "--user", "set-property", "sm.puri.OSK0",
+                       "/sm/puri/OSK0", "sm.puri.OSK0", "Visible", "b", "false"]
+            else:
+                cmd = ["dbus-send", "--type=method_call", "--dest=sm.puri.OSK0",
+                       "/sm/puri/OSK0", "sm.puri.OSK0.SetVisible", "boolean:false"]
+            subprocess.run(cmd, timeout=1.0, capture_output=True, check=False)
+        except Exception as exc:  # noqa: BLE001 -- absent squeekboard/dbus must be silent
+            logger.debug("squeekboard hide via dbus failed: %s", exc)
+
+    def _on_close(self) -> None:
+        self.hide_keyboard()
+        self.accept()
 
     def _confirm_exit(self) -> None:
         reply = QMessageBox.question(

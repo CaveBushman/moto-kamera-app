@@ -35,6 +35,7 @@ from motocam.ui.main_window import MainWindow
 from motocam.ui.theme import DARK_STYLESHEET
 from motocam.video.video_engine import VideoEngine
 from motocam.watchdog.health import HealthMonitor
+from motocam.watchdog.ui_watchdog import UiLatencyWatchdog
 
 
 LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "logo_ccf" / "CSC Logo Horizontal EN RGB.png"
@@ -194,6 +195,11 @@ def main() -> int:
     gps.open()
     video_engine.start()
     link.start()
+
+    # Field canary: warns to the log if anything ever blocks the UI thread
+    # again (all the heavy work is now off it). Silent on a healthy unit.
+    ui_watchdog = UiLatencyWatchdog(parent=window)
+    ui_watchdog.start()
 
     with loop:
         loop.create_task(async_connect_all(gimbal, camera))

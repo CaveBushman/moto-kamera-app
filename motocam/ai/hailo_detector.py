@@ -231,12 +231,14 @@ def build_detector(cfg: dict):
         return NullDetector()
     hef_path = ai_cfg.get("model") or ai_cfg.get("hef_path")
     if not hef_path:
-        logger.warning("ai.type=hailo but no ai.model HEF path set -- using NullDetector")
+        logger.warning("ai.type=hailo but no ai.model HEF path set -- using NullDetector "
+                       "(run scripts/hailo_check.py; see docs/HAILO_SETUP.md)")
         return NullDetector()
     labels = ai_cfg.get("labels")
     timeout_ms = int(ai_cfg.get("infer_timeout_ms", 500))
     try:
         return HailoDetector(hef_path, labels=labels, timeout_ms=timeout_ms)
     except Exception as exc:  # noqa: BLE001 -- missing runtime/HEF must degrade, not crash
-        logger.warning("Hailo detector unavailable (%s) -- using NullDetector (tap-to-select still works)", exc)
+        logger.warning("Hailo detector unavailable (%s) -- using NullDetector, tap-to-select "
+                       "still works (run scripts/hailo_check.py; see docs/HAILO_SETUP.md)", exc)
         return NullDetector()

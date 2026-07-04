@@ -10,6 +10,11 @@ venv/
 logs/
 *.log
 
+# Hailo models: large compiled binaries, downloaded per-machine by
+# scripts/setup_hailo.sh -- kept out of git (see models/README.md).
+*.hef
+models/*.hef
+
 # OS
 .DS_Store
 

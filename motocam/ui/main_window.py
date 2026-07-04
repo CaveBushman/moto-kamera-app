@@ -248,6 +248,7 @@ class MainWindow(QMainWindow):
 
         self.mode_bar.mode_selected.connect(self._on_mode_selected)
         self.mode_bar.reset_requested.connect(self._on_reset)
+        self.mode_bar.autofocus_requested.connect(self._on_autofocus_requested)
         self.mode_bar.manual_override.connect(self._on_manual_override)
 
         self.camera_panel.record_toggled.connect(self._on_record_toggled)

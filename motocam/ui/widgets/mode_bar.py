@@ -1,4 +1,7 @@
-"""Bottom mode bar: MANUAL | AI ASSIST | FULL AI | LOCK | HOME | REC | RESET.
+"""Bottom mode bar: MANUAL | AI ASSIST | FULL AI | LOCK | AF | RESET | OVERRIDE.
+
+AF triggers camera autofocus (not a mode -- a one-shot action, like
+RESET). HOME was removed; RESET now re-centres the gimbal in its place.
 
 MANUAL OVERRIDE (design doc 12.3) is deliberately the largest, reddest
 button and wired directly to an immediate AI-off call in main_window.py
@@ -15,6 +18,7 @@ from motocam.core.protocol import OperatingMode
 class ModeBar(QWidget):
     mode_selected = pyqtSignal(OperatingMode)
     reset_requested = pyqtSignal()
+    autofocus_requested = pyqtSignal()
     manual_override = pyqtSignal()
 
     def __init__(self):
@@ -33,7 +37,6 @@ class ModeBar(QWidget):
             (OperatingMode.AI_ASSIST, "AI ASSIST"),
             (OperatingMode.FULL_AI, "FULL AI"),
             (OperatingMode.LOCK, "LOCK"),
-            (OperatingMode.HOME, "HOME"),
         ):
             btn = QPushButton(label)
             btn.setMinimumWidth(112)
@@ -43,6 +46,15 @@ class ModeBar(QWidget):
             self._mode_buttons[mode] = btn
             layout.addWidget(btn)
         self._mode_buttons[OperatingMode.MANUAL].setChecked(True)
+
+        # AF: one-shot camera autofocus, always on the main screen (not
+        # tucked in the collapsible CAM/GIMBAL HUD). An action, not a mode,
+        # so it is not part of the exclusive mode group.
+        af_btn = QPushButton("AF")
+        af_btn.setObjectName("afButton")
+        af_btn.setMinimumWidth(96)
+        af_btn.clicked.connect(self.autofocus_requested.emit)
+        layout.addWidget(af_btn)
 
         reset_btn = QPushButton("RESET")
         reset_btn.setMinimumWidth(108)

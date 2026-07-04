@@ -57,9 +57,11 @@ class GimbalController:
 
     async def set_mode(self, mode: OperatingMode) -> None:
         self.mode = mode
-        if mode == OperatingMode.HOME:
+        # RESET now re-centres the gimbal (it absorbed HOME's role -- the
+        # HOME button was removed from the UI): both recentre to 0/0.
+        if mode in (OperatingMode.HOME, OperatingMode.RESET):
             await self.backend.go_home()
-        elif mode in (OperatingMode.LOCK, OperatingMode.RESET):
+        elif mode == OperatingMode.LOCK:
             await self.backend.set_velocity(0.0, 0.0)
 
     async def manual_move(self, pan_deg_s: float, tilt_deg_s: float) -> None:

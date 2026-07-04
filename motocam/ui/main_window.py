@@ -211,7 +211,10 @@ class MainWindow(QMainWindow):
         self._settings.set_video_values(self.video_engine.device)
         self._settings.set_audio_values(self.ptt_engine.input_device, self.talkback_player.output_device)
         self._settings.set_gimbal_values(self._config.get("gimbal", {}))
-        self._settings.set_pyxis_values(self.camera_ip, self.camera_port)
+        # Show the REST control port (rest_port: 80/443), not the 9993
+        # streaming port -- that is the only port the camera control uses.
+        rest_port = int(self._config.get("camera", {}).get("rest_port", 80))
+        self._settings.set_pyxis_values(self.camera_ip, rest_port)
         self._settings.set_camera_values(
             self.camera.state.iso, self.camera.state.white_balance,
             self.camera.state.shutter, self.camera.state.iris,
@@ -489,7 +492,7 @@ class MainWindow(QMainWindow):
 
     def _on_video_status(self, status: str) -> None:
         state = {"connected": "ok", "synthetic": "warn", "reconnecting": "warn", "lost": "bad"}.get(status, "idle")
-        self.top_bar.cam_chip.set_state(state, f"CAM {status.upper()}")
+        self.top_bar.cam_chip.set_state(state, f"VIDEO {status.upper()}")
 
     def _on_tap(self, x: int, y: int) -> None:
         if self._last_frame is not None:
@@ -646,6 +649,13 @@ class MainWindow(QMainWindow):
         self.gimbal_panel.update_orientation(self.gimbal.pan_deg, self.gimbal.tilt_deg, self.gimbal.roll_deg)
         self.gimbal_panel.set_connected(self.gimbal.connected)
         self.camera_panel.update_state(self.camera.state)
+        # PYXIS REST control link status (independent of the VIDEO grabber).
+        # Mock camera backend always reports connected; the real PYXIS
+        # backend reflects the live /system probe.
+        self.top_bar.pyxis_chip.set_state(
+            "ok" if self.camera.connected else "bad",
+            "OK" if self.camera.connected else "DOWN",
+        )
         self.preview.exposure_rocker.set_value_text(
             str(self.camera.state.iso) if self.camera.state.iso is not None else "--"
         )
@@ -794,16 +804,20 @@ class MainWindow(QMainWindow):
         if hasattr(backend, "ip"):
             # Live retarget of the real REST backend -- next refresh tick
             # probes the new address (its reconnect throttle is reset by
-            # dropping the connected flag), no app restart needed.
+            # dropping the connected flag), no app restart needed. The port
+            # must be applied too: the REST API lives on 80 (HTTP) or 443
+            # (HTTPS), NOT the 9993 streaming port -- silently ignoring it
+            # here meant SAVE changed the IP but never the port.
             backend.ip = ip
+            backend.port = port
             backend._connected = False
             backend._last_connect_attempt = 0.0
-            logger.info("PYXIS address changed to %s -- reconnecting on next refresh", ip)
+            logger.info("PYXIS address changed to %s:%d -- reconnecting on next refresh", ip, port)
         else:
             logger.info("Saved PYXIS address %s:%d (mock camera backend active)", ip, port)
         camera_cfg = self._config.setdefault("camera", {})
         camera_cfg["ip"] = ip
-        camera_cfg["port"] = port
+        camera_cfg["rest_port"] = port  # this field IS the REST port now
         self._save_config()
 
     def _on_audio_apply(self, input_device, output_device) -> None:

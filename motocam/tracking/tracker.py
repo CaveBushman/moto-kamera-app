@@ -17,7 +17,9 @@ import time
 import cv2
 import numpy as np
 
+from motocam.ai.ai_engine import Detection
 from motocam.core.protocol import TargetState
+from motocam.tracking.byte_tracker import ByteTracker
 
 logger = logging.getLogger("motocam.tracking")
 
@@ -41,6 +43,18 @@ class TrackingEngine:
 
     update() also still works when called directly and synchronously (as
     the unit tests do); the worker is optional and started via start().
+
+    Detection-driven mode (the peloton path): when the AI engine is
+    producing detections, update_detections() drives a ByteTracker that
+    holds a stable id per rider. Tapping (or FULL-AI auto-acquire) locks a
+    track *id*, and the target box then comes from that track -- coasting
+    through occlusion via the Kalman filter and surviving a rider crossing
+    in front, which CSRT cannot. When there are no detections (no HEF /
+    AI NULL) or the tap hits no track, it falls back to CSRT appearance
+    tracking. The ByteTracker is only ever touched from the UI thread
+    (update_detections / taps / control tick), so it needs no locking;
+    while a track id is locked the CSRT worker is idle and does not touch
+    the published target.
     """
 
     def __init__(self):
@@ -54,6 +68,9 @@ class TrackingEngine:
         self._wake = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self._running = False
+        # detection-driven peloton tracking (UI-thread only, no lock)
+        self._byte = ByteTracker()
+        self._locked_id: int | None = None
 
     @property
     def state(self) -> TargetState:
@@ -63,8 +80,51 @@ class TrackingEngine:
     def bbox(self) -> tuple[int, int, int, int] | None:
         return self._bbox
 
+    # -- detection-driven peloton tracking (UI thread) ----------------------
+    def update_detections(self, detections: list[Detection]) -> None:
+        """Advance the ByteTracker with the latest AI detections and, if a
+        rider id is locked, refresh the published target from that track
+        (coasting through occlusion). Cheap; called on the UI thread when
+        the AI worker delivers detections."""
+        self._byte.update(detections)
+        if self._locked_id is None:
+            return
+        track = self._byte.get(self._locked_id)
+        if track is None:
+            # the locked rider left tracking (dropped after max_age)
+            self._locked_id = None
+            self._bbox = None
+            self._state = TargetState.MANUAL_REQUIRED
+            logger.info("Locked track lost, manual re-selection required")
+        else:
+            self._publish_from_track(track)
+
+    def _publish_from_track(self, track) -> None:
+        bx, by, bw, bh = track.box
+        self._bbox = (int(bx), int(by), int(bw), int(bh))
+        self._state = TargetState.LOCKED if track.time_since_update == 0 else TargetState.WEAK
+        self._last_good_time = time.monotonic()
+
+    def _lock_track(self, track_id: int) -> None:
+        """Lock onto a ByteTracker id; the CSRT worker goes idle so it can't
+        overwrite the detection-driven target."""
+        self._locked_id = track_id
+        with self._lock:
+            self._tracker = None
+        track = self._byte.get(track_id)
+        if track is not None:
+            self._publish_from_track(track)
+        logger.info("Locked onto track id %d", track_id)
+
     def select_at(self, frame: np.ndarray, x: int, y: int, box_size: int = 120) -> None:
-        """Operator tap-to-select: start a fresh tracker centered on (x, y)."""
+        """Operator tap-to-select. Prefer locking the AI track under the tap
+        (stable id, occlusion-robust); fall back to a fresh CSRT box when no
+        detection is there (AI NULL / tapped between riders)."""
+        track_id = self._byte.track_at(x, y)
+        if track_id is not None:
+            self._lock_track(track_id)
+            return
+        self._locked_id = None
         h, w = frame.shape[:2]
         half = box_size // 2
         bx = max(0, min(w - box_size, x - half))
@@ -72,20 +132,26 @@ class TrackingEngine:
         bw = min(box_size, w - bx)
         bh = min(box_size, h - by)
         self._start(frame, (bx, by, bw, bh))
-        logger.info("Target selected at (%d, %d)", x, y)
+        logger.info("Target selected at (%d, %d) (CSRT fallback)", x, y)
 
     def select_box(self, frame: np.ndarray, box: tuple[int, int, int, int]) -> None:
-        """Auto-acquire from an AI detection box (design doc 8.3): seed the
-        CSRT tracker with the detector's actual bounding box, which is a
-        far better initialisation than a fixed square around a point."""
-        fh, fw = frame.shape[:2]
+        """Auto-acquire from an AI detection box (design doc 8.3, FULL AI).
+        Prefer locking the ByteTracker id at the detection's centre (stable,
+        occlusion-robust); fall back to seeding CSRT with the box when no
+        track is there yet."""
         bx, by, bw, bh = box
+        track_id = self._byte.track_at(bx + bw / 2.0, by + bh / 2.0)
+        if track_id is not None:
+            self._lock_track(track_id)
+            return
+        self._locked_id = None
+        fh, fw = frame.shape[:2]
         bx = max(0, min(fw - 1, bx))
         by = max(0, min(fh - 1, by))
         bw = max(1, min(fw - bx, bw))
         bh = max(1, min(fh - by, bh))
         self._start(frame, (bx, by, bw, bh))
-        logger.info("Target auto-acquired from detection at (%d, %d, %d, %d)", bx, by, bw, bh)
+        logger.info("Target auto-acquired from detection at (%d, %d, %d, %d) (CSRT)", bx, by, bw, bh)
 
     def _start(self, frame: np.ndarray, box: tuple[int, int, int, int]) -> None:
         with self._lock:
@@ -96,6 +162,7 @@ class TrackingEngine:
             self._last_good_time = time.monotonic()
 
     def clear(self) -> None:
+        self._locked_id = None
         with self._lock:
             self._tracker = None
             self._bbox = None
@@ -103,6 +170,11 @@ class TrackingEngine:
             self._last_good_time = None
 
     def update(self, frame: np.ndarray) -> None:
+        # In detection-driven (byte-locked) mode the target comes from the
+        # ByteTracker via update_detections(); CSRT stays idle so it can't
+        # fight over the published target.
+        if self._locked_id is not None:
+            return
         with self._lock:
             if self._tracker is None:
                 return

@@ -147,3 +147,60 @@ def test_stop_joins_the_worker_thread():
     engine.start()
     engine.stop()
     assert engine._worker_thread is None
+
+
+# -- detection-driven (ByteTrack) integration -----------------------------
+from motocam.ai.ai_engine import Detection  # noqa: E402
+
+
+def _cdet(x, y, w=40, h=80, conf=0.9):
+    return Detection(x=x, y=y, w=w, h=h, confidence=conf, class_name="cyclist")
+
+
+def test_tap_on_detection_locks_byte_track_not_csrt():
+    eng = TrackingEngine()
+    for i in range(4):  # confirm a moving track (min_hits=3)
+        eng.update_detections([_cdet(100 + i * 10, 100)])
+    eng.select_at(FRAME, 150, 140)  # inside the box (~130,100,40,80)
+    assert eng._locked_id == 1
+    assert eng._tracker is None  # CSRT deliberately idle in byte mode
+    assert eng.state == TargetState.LOCKED
+
+
+def test_tap_without_any_detection_falls_back_to_csrt():
+    eng = TrackingEngine()
+    eng.select_at(FRAME, 320, 240)  # no detections ever fed
+    assert eng._locked_id is None
+    assert eng._tracker is not None  # CSRT engaged
+    assert eng.state == TargetState.LOCKED
+
+
+def test_full_ai_select_box_locks_byte_track():
+    eng = TrackingEngine()
+    for i in range(4):
+        eng.update_detections([_cdet(100 + i * 10, 100)])
+    eng.select_box(FRAME, (130, 100, 40, 80))
+    assert eng._locked_id == 1
+    assert eng._tracker is None
+
+
+def test_locked_track_coasts_through_occlusion():
+    eng = TrackingEngine()
+    for i in range(4):
+        eng.update_detections([_cdet(100 + i * 10, 100)])
+    eng.select_at(FRAME, 150, 140)
+    for _ in range(3):  # detector blinks out -> Kalman coasts
+        eng.update_detections([])
+    assert eng.bbox is not None  # still following the (coasted) rider
+    assert eng.state in (TargetState.LOCKED, TargetState.WEAK)
+
+
+def test_locked_rider_dropped_after_max_age_needs_manual():
+    eng = TrackingEngine()
+    for i in range(4):
+        eng.update_detections([_cdet(100 + i * 10, 100)])
+    eng.select_at(FRAME, 150, 140)
+    for _ in range(35):  # beyond ByteTracker max_age (30)
+        eng.update_detections([])
+    assert eng._locked_id is None
+    assert eng.state == TargetState.MANUAL_REQUIRED

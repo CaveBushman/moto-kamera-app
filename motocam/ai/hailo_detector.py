@@ -147,11 +147,23 @@ class HailoDetector:
     to NullDetector cleanly (see build_detector)."""
     source = "hailo"
 
-    def __init__(self, hef_path: str, labels: list[str] | None = None, min_confidence: float = 0.05):
+    def __init__(
+        self,
+        hef_path: str,
+        labels: list[str] | None = None,
+        min_confidence: float = 0.05,
+        timeout_ms: int = 500,
+    ):
         if not HAILO_AVAILABLE:
-            raise RuntimeError("hailo_platform runtime not installed (not on a Pi with the AI HAT+?)")
+            raise RuntimeError("hailo_platform runtime not installed (not on a Pi with the AI HAT?)")
         self.labels = labels or COCO_LABELS
         self.min_confidence = min_confidence
+        # Bounded wait per inference: a stalled accelerator returns no
+        # detections for this frame instead of blocking. Even though
+        # inference now runs off the UI thread (AiWorker), a short timeout
+        # means the detector recovers quickly rather than sitting on a dead
+        # job for seconds. Tracking (CSRT) carries the target across the gap.
+        self._timeout_ms = max(50, int(timeout_ms))
         self._frame_times: list[float] = []
 
         params = VDevice.create_params()
@@ -175,9 +187,16 @@ class HailoDetector:
         bindings = self._configured_model.create_bindings(output_buffers=output_buffers)
         bindings.input().set_buffer(padded)
 
-        self._configured_model.wait_for_async_ready(timeout_ms=10000)
-        job = self._configured_model.run_async([bindings], lambda completion_info: None)
-        job.wait(10000)
+        # A timeout here (accelerator busy/stalled) must degrade to "no
+        # detection this frame", never raise up into the worker/UI. CSRT
+        # keeps the current target locked across the gap.
+        try:
+            self._configured_model.wait_for_async_ready(timeout_ms=self._timeout_ms)
+            job = self._configured_model.run_async([bindings], lambda completion_info: None)
+            job.wait(self._timeout_ms)
+        except Exception as exc:  # noqa: BLE001 -- realtime path: skip this frame, keep running
+            logger.debug("Hailo inference skipped (timeout/error): %s", exc)
+            return []
 
         nms_output = bindings.output().get_buffer()
         self._record_fps()
@@ -215,8 +234,9 @@ def build_detector(cfg: dict):
         logger.warning("ai.type=hailo but no ai.model HEF path set -- using NullDetector")
         return NullDetector()
     labels = ai_cfg.get("labels")
+    timeout_ms = int(ai_cfg.get("infer_timeout_ms", 500))
     try:
-        return HailoDetector(hef_path, labels=labels)
+        return HailoDetector(hef_path, labels=labels, timeout_ms=timeout_ms)
     except Exception as exc:  # noqa: BLE001 -- missing runtime/HEF must degrade, not crash
         logger.warning("Hailo detector unavailable (%s) -- using NullDetector (tap-to-select still works)", exc)
         return NullDetector()

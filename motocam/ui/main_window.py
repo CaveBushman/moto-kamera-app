@@ -14,6 +14,7 @@ from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from motocam.ai.ai_engine import AiEngine
+from motocam.ai.ai_worker import AiWorker
 from motocam.ai.hailo_detector import build_detector
 from motocam.audio.ptt_engine import SAMPLE_RATE, PttEngine
 from motocam.audio.talkback_player import TalkbackPlayer
@@ -107,6 +108,12 @@ class MainWindow(QMainWindow):
             target_class=ai_cfg.get("target_class", "cyclist"),
             confidence=float(ai_cfg.get("confidence", 0.35)),
         )
+        # Inference runs on its own thread (see AiWorker) -- the blocking
+        # Hailo wait must never sit on the UI thread's frame callback, or a
+        # single stalled inference freezes the whole display. The UI thread
+        # only ever reads the most recent detections this worker produced.
+        self.ai_worker = AiWorker(self.ai_engine)
+        self._latest_detections: list = []
         self.pid = GimbalPid(
             dead_zone_x=30, dead_zone_y=25,
             max_pan_speed=gimbal.max_pan_speed, max_tilt_speed=gimbal.max_tilt_speed,
@@ -215,6 +222,7 @@ class MainWindow(QMainWindow):
         self.video_engine.frame_ready.connect(self._on_frame)
         self.video_engine.fps_updated.connect(self._on_fps)
         self.video_engine.status_changed.connect(self._on_video_status)
+        self.ai_worker.detections_ready.connect(self._on_detections)
 
         self.preview.tapped.connect(self._on_tap)
         self.preview.cancel_track_requested.connect(self._on_cancel_track)
@@ -260,6 +268,8 @@ class MainWindow(QMainWindow):
         self._settings.exit_requested.connect(self._on_exit_requested)
 
     def _start_timers(self) -> None:
+        self.ai_worker.start()
+
         self._control_timer = QTimer(self)
         self._control_timer.timeout.connect(self._control_tick)
         self._control_timer.start(50)  # 20 Hz
@@ -282,9 +292,28 @@ class MainWindow(QMainWindow):
 
     # -- Video / tracking --------------------------------------------------
     def _on_frame(self, frame: np.ndarray) -> None:
+        # Per-frame path runs on the UI thread ~30x/s: it must stay light and
+        # must never raise into the Qt signal machinery, or a single bad
+        # frame can tear down the whole video pipeline. Heavy work (Hailo
+        # inference) is offloaded to AiWorker; the rest is guarded here.
+        try:
+            self._process_frame(frame)
+        except Exception as exc:  # noqa: BLE001 -- one frame failing must not stop the feed
+            logger.warning("frame processing error (skipped): %s", exc)
+
+    def _process_frame(self, frame: np.ndarray) -> None:
         self._last_frame = frame
         self.tracker.update(frame)
-        detections = self.ai_engine.process(frame)
+
+        # Inference is done off the UI thread; hand off the newest frame and
+        # act on the most recent detections the worker has produced. Seeding
+        # CSRT with the current frame and a slightly older detection box is
+        # fine -- the box is still approximately valid.
+        if self.ai_engine.enabled:
+            self.ai_worker.submit(frame)
+        else:
+            self._latest_detections = []
+        detections = self._latest_detections
         # FULL AI auto-acquire (design doc 8.2/8.3): with no active target,
         # lock onto the highest-confidence detection of the configured
         # class straight from the detector box. AI ASSIST keeps the rider
@@ -326,6 +355,10 @@ class MainWindow(QMainWindow):
                 # see CameraTelemetry.preview_bitrate_kbps docstring.
                 self._preview_bytes_accum += buf.nbytes
                 self._preview_resolution = f"{relay_w}x{relay_h}"
+
+    def _on_detections(self, detections: list) -> None:
+        """Latest detections from the off-thread AI worker (queued signal)."""
+        self._latest_detections = detections
 
     def _make_preview_relay_frame(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]
@@ -751,6 +784,10 @@ class MainWindow(QMainWindow):
             self.video_engine.stop()
         except Exception as exc:  # noqa: BLE001
             logger.debug("video stop failed: %s", exc)
+        try:
+            self.ai_worker.stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ai worker stop failed: %s", exc)
         try:
             self.gps.close()
         except Exception as exc:  # noqa: BLE001

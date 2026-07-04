@@ -37,6 +37,10 @@ class LinkClient(QObject):
         self._connected = False
         self._task: asyncio.Task | None = None
         self._last_ping_sent: float | None = None
+        self._telemetry_send_task: asyncio.Task | None = None
+        self._pending_telemetry: Telemetry | None = None
+        self._preview_send_task: asyncio.Task | None = None
+        self._pending_preview_jpeg: bytes | None = None
 
     @property
     def connected(self) -> bool:
@@ -46,6 +50,7 @@ class LinkClient(QObject):
         self._task = asyncio.ensure_future(self._run_forever())
 
     async def stop(self) -> None:
+        self._cancel_send_tasks()
         if self._task:
             self._task.cancel()
         if self._ws is not None:
@@ -57,6 +62,7 @@ class LinkClient(QObject):
         instead of requiring a config.yaml edit + restart)."""
         self.url = url
         self.unit_id = unit_id
+        self._cancel_send_tasks()
         if self._task is not None:
             self._task.cancel()
         if self._ws is not None:
@@ -105,26 +111,89 @@ class LinkClient(QObject):
             pass
 
     def send_telemetry(self, telemetry: Telemetry) -> None:
-        asyncio.ensure_future(self._send(make_envelope(MessageType.TELEMETRY, telemetry, self.unit_id)))
+        if self._telemetry_send_task is not None and not self._telemetry_send_task.done():
+            self._pending_telemetry = telemetry
+            return
+        self._start_telemetry_send(telemetry)
 
     def send_preview_frame(self, jpeg_bytes: bytes) -> None:
+        if self._preview_send_task is not None and not self._preview_send_task.done():
+            self._pending_preview_jpeg = jpeg_bytes
+            return
+        self._start_preview_send(jpeg_bytes)
+
+    def _start_telemetry_send(self, telemetry: Telemetry) -> None:
+        self._telemetry_send_task = self._schedule_send(
+            make_envelope(MessageType.TELEMETRY, telemetry, self.unit_id),
+            "telemetry send",
+            self._on_telemetry_send_done,
+        )
+
+    def _on_telemetry_send_done(self, task: asyncio.Task) -> None:
+        self._consume_send_task(task, "telemetry send")
+        if self._telemetry_send_task is task:
+            self._telemetry_send_task = None
+        pending = self._pending_telemetry
+        self._pending_telemetry = None
+        if pending is not None:
+            self._start_telemetry_send(pending)
+
+    def _start_preview_send(self, jpeg_bytes: bytes) -> None:
         payload = {"jpeg_b64": base64.b64encode(jpeg_bytes).decode("ascii")}
-        asyncio.ensure_future(self._send(make_envelope(MessageType.PREVIEW_FRAME, payload, self.unit_id)))
+        self._preview_send_task = self._schedule_send(
+            make_envelope(MessageType.PREVIEW_FRAME, payload, self.unit_id),
+            "preview send",
+            self._on_preview_send_done,
+        )
+
+    def _on_preview_send_done(self, task: asyncio.Task) -> None:
+        self._consume_send_task(task, "preview send")
+        if self._preview_send_task is task:
+            self._preview_send_task = None
+        pending = self._pending_preview_jpeg
+        self._pending_preview_jpeg = None
+        if pending is not None:
+            self._start_preview_send(pending)
+
+    def _schedule_send(self, envelope: Envelope, label: str, callback=None) -> asyncio.Task:
+        task = asyncio.ensure_future(self._send(envelope))
+        if callback is not None:
+            task.add_done_callback(callback)
+        else:
+            task.add_done_callback(lambda done_task, task_label=label: self._consume_send_task(done_task, task_label))
+        return task
+
+    def _consume_send_task(self, task: asyncio.Task, label: str) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s failed: %s", label, exc)
+
+    def _cancel_send_tasks(self) -> None:
+        for task in (self._telemetry_send_task, self._preview_send_task):
+            if task is not None and not task.done():
+                task.cancel()
+        self._telemetry_send_task = None
+        self._pending_telemetry = None
+        self._preview_send_task = None
+        self._pending_preview_jpeg = None
 
     def send_log_event(self, level: str, message: str, module: str = "") -> None:
         payload = {"level": level, "message": message, "module": module}
-        asyncio.ensure_future(self._send(make_envelope(MessageType.LOG_EVENT, payload, self.unit_id)))
+        self._schedule_send(make_envelope(MessageType.LOG_EVENT, payload, self.unit_id), "log send")
 
     def send_ping(self) -> None:
         self._last_ping_sent = time.time()
-        asyncio.ensure_future(self._send(make_envelope(MessageType.PING, {}, self.unit_id)))
+        self._schedule_send(make_envelope(MessageType.PING, {}, self.unit_id), "ping send")
 
     def send_ptt_start(self) -> None:
-        asyncio.ensure_future(self._send(make_envelope(MessageType.PTT_START, {}, self.unit_id)))
+        self._schedule_send(make_envelope(MessageType.PTT_START, {}, self.unit_id), "ptt start send")
 
     def send_ptt_audio(self, pcm_bytes: bytes, sample_rate: int) -> None:
         payload = {"audio_b64": base64.b64encode(pcm_bytes).decode("ascii"), "sample_rate": sample_rate}
-        asyncio.ensure_future(self._send(make_envelope(MessageType.PTT_AUDIO, payload, self.unit_id)))
+        self._schedule_send(make_envelope(MessageType.PTT_AUDIO, payload, self.unit_id), "ptt audio send")
 
     def send_ptt_stop(self) -> None:
-        asyncio.ensure_future(self._send(make_envelope(MessageType.PTT_STOP, {}, self.unit_id)))
+        self._schedule_send(make_envelope(MessageType.PTT_STOP, {}, self.unit_id), "ptt stop send")

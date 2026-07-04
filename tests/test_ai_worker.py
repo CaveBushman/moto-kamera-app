@@ -58,6 +58,19 @@ def test_take_drops_all_but_the_latest_submitted_frame():
     assert worker._take() is None  # and it is consumed exactly once
 
 
+def test_max_fps_limiter_drops_over_budget_frames():
+    engine = AiEngine(detector=_CountingDetector())
+    worker = AiWorker(engine, max_fps=1.0)
+
+    assert worker.submit(_frame(1)) is True
+    assert worker.submit(_frame(2)) is False
+
+    stats = worker.stats()
+    assert stats["accepted_frames"] == 1
+    assert stats["dropped_frames"] == 1
+    assert worker.max_fps == 1.0
+
+
 def test_disabled_engine_yields_no_detections():
     engine = AiEngine(detector=_CountingDetector())
     engine.enabled = False
@@ -77,6 +90,10 @@ def test_running_worker_emits_detections(qapp):
     finally:
         worker.stop()
     assert received and received[-1][0].x == 7
+    stats = worker.stats()
+    assert stats["completed_frames"] >= 1
+    assert stats["last_inference_ms"] is not None
+    assert stats["worker_util_pct"] is not None
 
 
 def test_inference_exception_is_swallowed(qapp):

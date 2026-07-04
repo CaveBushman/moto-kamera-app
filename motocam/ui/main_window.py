@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
         # Hailo wait must never sit on the UI thread's frame callback, or a
         # single stalled inference freezes the whole display. The UI thread
         # only ever reads the most recent detections this worker produced.
-        self.ai_worker = AiWorker(self.ai_engine)
+        self.ai_worker = AiWorker(self.ai_engine, max_fps=float(ai_cfg.get("max_fps", 12.0)))
         self._latest_detections: list = []
         self.pid = GimbalPid(
             dead_zone_x=30, dead_zone_y=25,
@@ -125,6 +125,13 @@ class MainWindow(QMainWindow):
         self._preview_bytes_accum = 0
         self._preview_bitrate_kbps: float | None = None
         self._preview_resolution: str | None = None
+        self._camera_refresh_task: asyncio.Task | None = None
+        self._gimbal_refresh_task: asyncio.Task | None = None
+        self._gimbal_connect_task: asyncio.Task | None = None
+        self._gimbal_velocity_task: asyncio.Task | None = None
+        self._pending_gimbal_velocity: tuple[bool, float, float] | None = None
+        self._zoom_task: asyncio.Task | None = None
+        self._pending_zoom_speed: float | None = None
 
         self._build_ui()
         self._wire_signals()
@@ -213,6 +220,7 @@ class MainWindow(QMainWindow):
             self.ai_engine.target_class, self.ai_engine.confidence,
             int(self.pid.pan.dead_zone), int(self.pid.tilt.dead_zone),
             self.pid.pan.max_speed, self.pid.tilt.max_speed,
+            self.ai_worker.max_fps,
         )
         self._settings.set_safety_values(self._ride_lock_enabled, self._ride_lock_speed_kmh)
         self._settings.exec()
@@ -257,6 +265,7 @@ class MainWindow(QMainWindow):
         self._settings.confidence_changed.connect(self._on_confidence_changed)
         self._settings.dead_zone_changed.connect(self._on_dead_zone_changed)
         self._settings.max_speed_changed.connect(self._on_max_speed_changed)
+        self._settings.ai_max_fps_changed.connect(self._on_ai_max_fps_changed)
 
         self._settings.connection_apply_requested.connect(self._on_connection_apply)
         self._settings.pyxis_apply_requested.connect(self._on_pyxis_apply)
@@ -267,8 +276,102 @@ class MainWindow(QMainWindow):
         self._settings.safety_apply_requested.connect(self._on_safety_apply)
         self._settings.exit_requested.connect(self._on_exit_requested)
 
+    def _schedule_unique_task(self, attr_name: str, label: str, coro_factory) -> None:
+        task = getattr(self, attr_name)
+        if task is not None and not task.done():
+            return
+        try:
+            coro = coro_factory()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s scheduling failed: %s", label, exc)
+            return
+        task = asyncio.ensure_future(coro)
+        setattr(self, attr_name, task)
+        task.add_done_callback(
+            lambda done_task, attr=attr_name, task_label=label: self._on_unique_task_done(
+                attr, task_label, done_task
+            )
+        )
+
+    def _on_unique_task_done(self, attr_name: str, label: str, task: asyncio.Task) -> None:
+        if getattr(self, attr_name, None) is task:
+            setattr(self, attr_name, None)
+        self._consume_task_result(task, label)
+
+    def _consume_task_result(self, task: asyncio.Task, label: str) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s failed: %s", label, exc)
+
+    def _request_gimbal_velocity(self, manual: bool, pan_deg_s: float, tilt_deg_s: float) -> None:
+        task = self._gimbal_velocity_task
+        if task is not None and not task.done():
+            self._pending_gimbal_velocity = (manual, pan_deg_s, tilt_deg_s)
+            return
+        self._start_gimbal_velocity(manual, pan_deg_s, tilt_deg_s)
+
+    def _start_gimbal_velocity(self, manual: bool, pan_deg_s: float, tilt_deg_s: float) -> None:
+        async def send_velocity() -> None:
+            if manual:
+                await self.gimbal.manual_move(pan_deg_s, tilt_deg_s)
+            else:
+                await self.gimbal.ai_move(pan_deg_s, tilt_deg_s)
+
+        task = asyncio.ensure_future(send_velocity())
+        self._gimbal_velocity_task = task
+        task.add_done_callback(self._on_gimbal_velocity_done)
+
+    def _on_gimbal_velocity_done(self, task: asyncio.Task) -> None:
+        if self._gimbal_velocity_task is task:
+            self._gimbal_velocity_task = None
+        self._consume_task_result(task, "gimbal velocity")
+        pending = self._pending_gimbal_velocity
+        self._pending_gimbal_velocity = None
+        if pending is not None:
+            self._start_gimbal_velocity(*pending)
+
+    def _request_zoom_speed(self, speed: float) -> None:
+        task = self._zoom_task
+        if task is not None and not task.done():
+            self._pending_zoom_speed = speed
+            return
+        self._start_zoom_speed(speed)
+
+    def _start_zoom_speed(self, speed: float) -> None:
+        task = asyncio.ensure_future(self.camera.set_zoom_speed(speed))
+        self._zoom_task = task
+        task.add_done_callback(self._on_zoom_done)
+
+    def _on_zoom_done(self, task: asyncio.Task) -> None:
+        if self._zoom_task is task:
+            self._zoom_task = None
+        self._consume_task_result(task, "zoom command")
+        pending = self._pending_zoom_speed
+        self._pending_zoom_speed = None
+        if pending is not None:
+            self._start_zoom_speed(pending)
+
+    def _cancel_background_tasks(self) -> None:
+        for attr_name in (
+            "_camera_refresh_task",
+            "_gimbal_refresh_task",
+            "_gimbal_connect_task",
+            "_gimbal_velocity_task",
+            "_zoom_task",
+        ):
+            task = getattr(self, attr_name, None)
+            if task is not None and not task.done():
+                task.cancel()
+            setattr(self, attr_name, None)
+        self._pending_gimbal_velocity = None
+        self._pending_zoom_speed = None
+
     def _start_timers(self) -> None:
         self.ai_worker.start()
+        self.tracker.start()
 
         self._control_timer = QTimer(self)
         self._control_timer.timeout.connect(self._control_tick)
@@ -303,7 +406,11 @@ class MainWindow(QMainWindow):
 
     def _process_frame(self, frame: np.ndarray) -> None:
         self._last_frame = frame
-        self.tracker.update(frame)
+        # CSRT update() is heavy; run it on the tracker's worker thread
+        # (submit drops stale frames) instead of blocking the UI here. The
+        # bbox/state read below reflect the last completed update -- <1 frame
+        # of lag on the overlay, which is imperceptible.
+        self.tracker.submit(frame)
 
         # Inference is done off the UI thread; hand off the newest frame and
         # act on the most recent detections the worker has produced. Seeding
@@ -402,16 +509,16 @@ class MainWindow(QMainWindow):
             return
         pan_v = dx_norm * self.gimbal.max_pan_speed
         tilt_v = -dy_norm * self.gimbal.max_tilt_speed
-        asyncio.ensure_future(self.gimbal.manual_move(pan_v, tilt_v))
+        self._request_gimbal_velocity(True, pan_v, tilt_v)
 
     def _on_manual_drag_end(self) -> None:
-        asyncio.ensure_future(self.gimbal.manual_move(0.0, 0.0))
+        self._request_gimbal_velocity(True, 0.0, 0.0)
 
     def _on_zoom_drag(self, zoom_speed: float) -> None:
-        asyncio.ensure_future(self.camera.set_zoom_speed(zoom_speed))
+        self._request_zoom_speed(zoom_speed)
 
     def _on_zoom_drag_end(self) -> None:
-        asyncio.ensure_future(self.camera.set_zoom_speed(0.0))
+        self._request_zoom_speed(0.0)
 
     def _on_exposure_step(self, direction: int) -> None:
         """One flick of the exposure rocker = one ISO stop. Steps from the
@@ -501,7 +608,7 @@ class MainWindow(QMainWindow):
             if error is None:
                 return
             pan_v, tilt_v = self.pid.update(*error)
-            asyncio.ensure_future(self.gimbal.ai_move(pan_v, tilt_v))
+            self._request_gimbal_velocity(False, pan_v, tilt_v)
         elif self.gimbal.mode == OperatingMode.MANUAL and self.preview.joystick.is_dragging:
             # re-send every tick (not just on touch-move) so holding the
             # knob at an offset keeps panning/tilting instead of stopping
@@ -527,11 +634,15 @@ class MainWindow(QMainWindow):
         self.preview.set_ride_locked(locked)
 
     def _async_refresh_tick(self) -> None:
-        asyncio.ensure_future(self.camera.refresh())
+        self._schedule_unique_task("_camera_refresh_task", "camera refresh", self.camera.refresh)
         if self.gimbal.connected:
-            asyncio.ensure_future(self.gimbal.refresh_orientation())
+            self._schedule_unique_task(
+                "_gimbal_refresh_task",
+                "gimbal orientation refresh",
+                self.gimbal.refresh_orientation,
+            )
         else:
-            asyncio.ensure_future(self.gimbal.connect())
+            self._schedule_unique_task("_gimbal_connect_task", "gimbal connect", self.gimbal.connect)
         self.gimbal_panel.update_orientation(self.gimbal.pan_deg, self.gimbal.tilt_deg, self.gimbal.roll_deg)
         self.gimbal_panel.set_connected(self.gimbal.connected)
         self.camera_panel.update_state(self.camera.state)
@@ -559,12 +670,17 @@ class MainWindow(QMainWindow):
         else:
             self._preview_bitrate_kbps = None
         self._preview_bytes_accum = 0
+        ai_stats = self.ai_worker.stats()
         telemetry = Telemetry(
             gps=self.gps.state,
             ai=AiTelemetry(
                 enabled=self.ai_engine.enabled,
                 state=self.tracker.state.value,
                 inference_fps=self.ai_engine.detector.fps,
+                max_fps=float(ai_stats["max_fps"] or 0.0),
+                worker_util_pct=ai_stats["worker_util_pct"],
+                last_inference_ms=ai_stats["last_inference_ms"],
+                dropped_frames=int(ai_stats["dropped_frames"] or 0),
             ),
             gimbal=GimbalTelemetry(
                 connected=self.gimbal.connected, mode=self.gimbal.mode.value,
@@ -656,6 +772,11 @@ class MainWindow(QMainWindow):
         self.gimbal.max_pan_speed = max_pan_speed
         self.gimbal.max_tilt_speed = max_tilt_speed
 
+    def _on_ai_max_fps_changed(self, max_fps: float) -> None:
+        self.ai_worker.set_max_fps(max_fps)
+        self._config.setdefault("ai", {})["max_fps"] = max_fps
+        self._save_config()
+
     def _on_connection_apply(self, unit_id: str, control_room_url: str) -> None:
         self.unit_id = unit_id
         self.setWindowTitle(f"MotoCam - {unit_id}")
@@ -727,6 +848,12 @@ class MainWindow(QMainWindow):
         self._settings.set_ble_scan_results(devices)
 
     async def _rebuild_gimbal_backend(self) -> None:
+        for attr_name in ("_gimbal_refresh_task", "_gimbal_connect_task", "_gimbal_velocity_task"):
+            task = getattr(self, attr_name, None)
+            if task is not None and not task.done():
+                task.cancel()
+            setattr(self, attr_name, None)
+        self._pending_gimbal_velocity = None
         try:
             await self.gimbal.disconnect()
         except Exception as exc:  # noqa: BLE001
@@ -773,6 +900,8 @@ class MainWindow(QMainWindow):
         self.close()             # triggers closeEvent cleanup, then quit
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        self._cancel_background_tasks()
+        self._settings.stop_background_work()
         self.ptt_engine.stop()
         self.talkback_player.stop()
         # Stop hardware/timers so nothing keeps the event loop alive after
@@ -788,6 +917,10 @@ class MainWindow(QMainWindow):
             self.ai_worker.stop()
         except Exception as exc:  # noqa: BLE001
             logger.debug("ai worker stop failed: %s", exc)
+        try:
+            self.tracker.stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("tracker stop failed: %s", exc)
         try:
             self.gps.close()
         except Exception as exc:  # noqa: BLE001

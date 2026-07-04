@@ -8,6 +8,8 @@ ai:
   type: hailo             # "hailo" = real AI HAT+ inference; anything else = NullDetector (tap-to-select only)
   model: /opt/motorcam/models/cyclist_yolo.hef   # compiled .hef for the Hailo-8 (26 TOPS)
   confidence: 0.35
+  max_fps: 12            # Hailo inference cap; CSRT tracking still runs on every video frame
+  infer_timeout_ms: 500  # skip one AI frame instead of blocking when Hailo stalls
   target_class: cyclist
   # labels: class order of the compiled model. Omit for a stock COCO
   # YOLOv8/v11 HEF (person/bicycle/car/motorcycle/...). A custom
@@ -31,7 +33,14 @@ camera:
   type: blackmagic_pyxis
   ip: 192.168.9.20
   port: 9993
-  rest_port: 80
+  rest_port: 80         # Camera Control REST API port (HTTP 80 by default)
+  use_tls: false        # true if the camera serves the REST API over HTTPS
+                        # (recent firmware presents a device cert on :443 --
+                        # then set rest_port: 443 and use_tls: true)
+  verify_tls: false     # self-signed Blackmagic device cert -> leave false
+  username: null        # set username+password (or auth_token) only if the
+  password: null        # camera has REST API authentication enabled
+  auth_token: null
 gps:
   device: auto          # auto-detects NMEA USB GPS; use null for simulated GPS or an explicit /dev/ttyACM0 path
   baudrate: 9600

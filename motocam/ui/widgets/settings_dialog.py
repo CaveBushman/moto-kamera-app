@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -53,6 +53,38 @@ DEFAULT_CONTROL_ROOM_PORT = 8765
 DEFAULT_PYXIS_PORT = 9993
 
 
+class DeviceScanWorker(QThread):
+    """Lists video/audio devices away from the GUI thread."""
+
+    results_ready = pyqtSignal(object, object, object, object)  # video, audio_in, audio_out, error
+
+    def run(self) -> None:  # noqa: D401 -- QThread entry point
+        errors: list[str] = []
+        video_devices = []
+        audio_inputs = []
+        audio_outputs = []
+        try:
+            video_devices = list_video_devices()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to list video devices (%s)", exc)
+            errors.append(f"video: {exc}")
+        if not self.isInterruptionRequested():
+            try:
+                audio_inputs = list_audio_devices("input")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to list audio input devices (%s)", exc)
+                errors.append(f"audio input: {exc}")
+        if not self.isInterruptionRequested():
+            try:
+                audio_outputs = list_audio_devices("output")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to list audio output devices (%s)", exc)
+                errors.append(f"audio output: {exc}")
+        if self.isInterruptionRequested():
+            return
+        self.results_ready.emit(video_devices, audio_inputs, audio_outputs, "; ".join(errors) or None)
+
+
 class SettingsDialog(QDialog):
     iso_changed = pyqtSignal(int)
     white_balance_changed = pyqtSignal(int)
@@ -63,6 +95,7 @@ class SettingsDialog(QDialog):
     confidence_changed = pyqtSignal(float)
     dead_zone_changed = pyqtSignal(int, int)
     max_speed_changed = pyqtSignal(float, float)
+    ai_max_fps_changed = pyqtSignal(float)
 
     connection_apply_requested = pyqtSignal(str, str)  # (unit_id, control_room_url)
     pyxis_apply_requested = pyqtSignal(str, int)  # (ip, port)
@@ -77,6 +110,10 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.resize(640, 820)
+        self._device_scan_worker: DeviceScanWorker | None = None
+        self._pending_video_device: int | str | None = None
+        self._pending_input_device: int | str | None = None
+        self._pending_output_device: int | str | None = None
 
         outer_layout = QVBoxLayout(self)
 
@@ -173,8 +210,9 @@ class SettingsDialog(QDialog):
         `Visible` property is read-only, so `busctl set-property ... Visible`
         errors out -- which is exactly why the button did nothing (busctl is
         found before dbus-send, so the working fallback was never reached).
-        We now issue the SetVisible method on whichever tool exists, and if
-        the first one errors we fall through to the next."""
+        We now fire the SetVisible method without waiting for DBus: this
+        runs on every Settings button tap, so waiting for a wedged session
+        bus would make the dialog feel frozen."""
         import shutil
         import subprocess
         import sys
@@ -194,16 +232,17 @@ class SettingsDialog(QDialog):
             ])
         for cmd in attempts:
             try:
-                result = subprocess.run(cmd, timeout=1.0, capture_output=True, check=False)
+                subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                return
             except Exception as exc:  # noqa: BLE001 -- absent dbus tool must stay silent
                 logger.debug("squeekboard hide via %s failed: %s", cmd[0], exc)
                 continue
-            if result.returncode == 0:
-                return
-            logger.debug(
-                "squeekboard hide via %s returned %d: %s",
-                cmd[0], result.returncode, result.stderr.decode(errors="replace").strip(),
-            )
 
     def _on_close(self) -> None:
         self.hide_keyboard()
@@ -298,7 +337,7 @@ class SettingsDialog(QDialog):
         form.addRow("Capture device", self.video_device_combo)
 
         refresh_btn = QPushButton("RESCAN DEVICES")
-        refresh_btn.clicked.connect(lambda: self._populate_video_combo(self.video_device_combo.currentData()))
+        refresh_btn.clicked.connect(self._refresh_device_lists)
         form.addRow(refresh_btn)
 
         apply_btn = QPushButton("APPLY VIDEO SOURCE")
@@ -308,13 +347,22 @@ class SettingsDialog(QDialog):
         return group
 
     def set_video_values(self, current_device: int | str | None) -> None:
-        self._populate_video_combo(current_device)
+        self._pending_video_device = current_device
+        self._set_video_combo_loading(current_device)
+        self._start_device_scan()
 
-    def _populate_video_combo(self, current_device: int | str | None) -> None:
+    def _set_video_combo_loading(self, current_device: int | str | None) -> None:
         combo = self.video_device_combo
         combo.blockSignals(True)
         combo.clear()
-        devices = list_video_devices()
+        combo.addItem("Scanning capture devices...", current_device)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _populate_video_combo(self, current_device: int | str | None, devices: list) -> None:
+        combo = self.video_device_combo
+        combo.blockSignals(True)
+        combo.clear()
         if not devices:
             combo.addItem("No capture device found (synthetic preview)", current_device)
         for device in devices:
@@ -348,8 +396,11 @@ class SettingsDialog(QDialog):
         return group
 
     def set_audio_values(self, input_device: int | str | None, output_device: int | str | None) -> None:
-        self._populate_device_combo(self.input_device_combo, "input", input_device)
-        self._populate_device_combo(self.output_device_combo, "output", output_device)
+        self._pending_input_device = input_device
+        self._pending_output_device = output_device
+        self._set_audio_combo_loading(self.input_device_combo, input_device)
+        self._set_audio_combo_loading(self.output_device_combo, output_device)
+        self._start_device_scan()
 
     def _emit_audio_apply(self) -> None:
         self.audio_apply_requested.emit(self.input_device_combo.currentData(), self.output_device_combo.currentData())
@@ -624,6 +675,13 @@ class SettingsDialog(QDialog):
         self.confidence_spin.valueChanged.connect(self.confidence_changed.emit)
         form.addRow("Min. confidence", self.confidence_spin)
 
+        self.ai_max_fps_spin = QDoubleSpinBox()
+        self.ai_max_fps_spin.setRange(1.0, 30.0)
+        self.ai_max_fps_spin.setSingleStep(1.0)
+        self.ai_max_fps_spin.setSuffix(" fps")
+        self.ai_max_fps_spin.valueChanged.connect(self.ai_max_fps_changed.emit)
+        form.addRow("AI max FPS", self.ai_max_fps_spin)
+
         self.dead_zone_x_spin = QSpinBox()
         self.dead_zone_x_spin.setRange(0, 200)
         self.dead_zone_x_spin.setSuffix(" px")
@@ -654,10 +712,12 @@ class SettingsDialog(QDialog):
         self, target_class: str, confidence: float,
         dead_zone_x: int, dead_zone_y: int,
         max_pan_speed: float, max_tilt_speed: float,
+        ai_max_fps: float,
     ) -> None:
         self._select(self.target_class_combo, target_class)
         for spin, value in (
             (self.confidence_spin, confidence),
+            (self.ai_max_fps_spin, ai_max_fps),
             (self.dead_zone_x_spin, dead_zone_x),
             (self.dead_zone_y_spin, dead_zone_y),
             (self.max_pan_speed_spin, max_pan_speed),
@@ -720,12 +780,67 @@ class SettingsDialog(QDialog):
             combo.setCurrentIndex(idx)
         combo.blockSignals(False)
 
+    def _refresh_device_lists(self) -> None:
+        self._pending_video_device = self.video_device_combo.currentData()
+        self._pending_input_device = self.input_device_combo.currentData()
+        self._pending_output_device = self.output_device_combo.currentData()
+        self._set_video_combo_loading(self._pending_video_device)
+        self._set_audio_combo_loading(self.input_device_combo, self._pending_input_device)
+        self._set_audio_combo_loading(self.output_device_combo, self._pending_output_device)
+        self._start_device_scan(force=True)
+
+    def _start_device_scan(self, force: bool = False) -> None:
+        if self._device_scan_worker is not None and self._device_scan_worker.isRunning():
+            if force:
+                logger.info("Device scan already running; ignoring duplicate request")
+            return
+        worker = DeviceScanWorker(self)
+        worker.results_ready.connect(self._on_device_scan_results)
+        worker.finished.connect(self._on_device_scan_finished)
+        self._device_scan_worker = worker
+        worker.start()
+
+    def _on_device_scan_results(
+        self,
+        video_devices: list,
+        audio_inputs: list,
+        audio_outputs: list,
+        error: str | None,
+    ) -> None:
+        if error:
+            logger.warning("Device scan completed with errors: %s", error)
+        self._populate_video_combo(self._pending_video_device, video_devices)
+        self._populate_audio_combo(self.input_device_combo, self._pending_input_device, audio_inputs)
+        self._populate_audio_combo(self.output_device_combo, self._pending_output_device, audio_outputs)
+
+    def _on_device_scan_finished(self) -> None:
+        worker = self._device_scan_worker
+        self._device_scan_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def stop_background_work(self) -> None:
+        worker = self._device_scan_worker
+        if worker is None:
+            return
+        worker.requestInterruption()
+        if worker.isRunning() and not worker.wait(500):
+            logger.warning("Device scan worker still running during Settings shutdown")
+
     @staticmethod
-    def _populate_device_combo(combo: QComboBox, kind: str, current_device: int | str | None) -> None:
+    def _set_audio_combo_loading(combo: QComboBox, current_device: int | str | None) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Scanning audio devices...", current_device)
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    @staticmethod
+    def _populate_audio_combo(combo: QComboBox, current_device: int | str | None, devices: list) -> None:
         combo.blockSignals(True)
         combo.clear()
         combo.addItem("System default", None)
-        for device in list_audio_devices(kind):  # type: ignore[arg-type]
+        for device in devices:
             combo.addItem(device.label, device.index)
         selected = 0
         for index in range(combo.count()):

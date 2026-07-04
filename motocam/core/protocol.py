@@ -73,6 +73,10 @@ class AiTelemetry:
     state: str = TargetState.IDLE.value
     target_id: int | None = None
     inference_fps: float = 0.0
+    max_fps: float | None = None
+    worker_util_pct: float | None = None
+    last_inference_ms: float | None = None
+    dropped_frames: int = 0
 
 
 @dataclass

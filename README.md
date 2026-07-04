@@ -132,6 +132,13 @@ Beyond MVP1, also implemented:
   The rider top bar also marks fallback sources as warnings (`GPS SIM`,
   `GIMBAL MOCK`, `CAM SYNTH`, `AI NULL`) instead of letting them look
   like normal ready states.
+- **AI HAT+ performance control**: `config/config.yaml -> ai.max_fps`
+  caps Hailo inference rate independently from the video/tracking loop
+  (default 12 fps). CSRT tracking still updates on every video frame, so
+  the Pi can keep touch/UI/video responsive while the AI accelerator and
+  preprocessing stay within a predictable budget. Telemetry reports AI
+  inference FPS, cap, worker busy estimate, last inference time and
+  dropped AI frames; Settings exposes AI max FPS live, no restart.
 - **GPS auto-detect**: `gps.device: auto` scans common USB serial paths
   and only accepts a port after seeing an NMEA sentence; otherwise it
   falls back to simulated GPS with the source marked `SIMULATED`.

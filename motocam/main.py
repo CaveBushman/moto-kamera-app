@@ -55,6 +55,11 @@ def build_camera(cfg: dict) -> CameraController:
         backend = PyxisCameraBackend(
             ip=camera_cfg.get("ip", "192.168.9.20"),
             port=int(camera_cfg.get("rest_port", 80)),
+            use_tls=bool(camera_cfg.get("use_tls", False)),
+            verify_tls=bool(camera_cfg.get("verify_tls", False)),
+            username=camera_cfg.get("username"),
+            password=camera_cfg.get("password"),
+            auth_token=camera_cfg.get("auth_token"),
         )
         return CameraController(backend)
     return CameraController(MockCameraBackend())

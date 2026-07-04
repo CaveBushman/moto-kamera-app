@@ -32,8 +32,10 @@ event loop never blocks.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -88,24 +90,70 @@ def parse_iris(iris: str) -> dict | None:
 class PyxisCameraBackend(CameraBackend):
     source = "pyxis-rest"
 
-    def __init__(self, ip: str, port: int = 80):
+    def __init__(
+        self,
+        ip: str,
+        port: int = 80,
+        use_tls: bool = False,
+        verify_tls: bool = False,
+        username: str | None = None,
+        password: str | None = None,
+        auth_token: str | None = None,
+    ):
+        """Blackmagic Camera Control REST backend.
+
+        Recent firmware (PYXIS presents a device TLS cert on :443) can serve
+        the control API over HTTPS and gate it behind credentials, so the
+        transport is configurable:
+
+        - use_tls: talk HTTPS instead of HTTP.
+        - verify_tls: validate the cert chain. Off by default because the
+          camera presents a self-signed Blackmagic *device* certificate that
+          no public CA vouches for -- verifying would always fail. (Point
+          this at a pinned CA bundle only if you provision one.)
+        - auth_token / username+password: sent as an Authorization header
+          (Bearer, else Basic) when the camera requires authentication.
+        """
         self.ip = ip
         self.port = port
+        self._scheme = "https" if use_tls else "http"
+        self._ssl_context = self._build_ssl_context(use_tls, verify_tls)
+        self._auth_header = self._build_auth_header(auth_token, username, password)
         self._connected = False
         self._last_connect_attempt = 0.0
         self._zoom_normalised: float | None = None
         self._zoom_unsupported_logged = False
 
+    @staticmethod
+    def _build_ssl_context(use_tls: bool, verify_tls: bool) -> ssl.SSLContext | None:
+        if not use_tls:
+            return None
+        if verify_tls:
+            return ssl.create_default_context()
+        # Self-signed device cert: encrypt but don't verify the chain.
+        return ssl._create_unverified_context()
+
+    @staticmethod
+    def _build_auth_header(auth_token: str | None, username: str | None, password: str | None) -> str | None:
+        if auth_token:
+            return f"Bearer {auth_token}"
+        if username is not None and password is not None:
+            token = base64.b64encode(f"{username}:{password}".encode()).decode()
+            return f"Basic {token}"
+        return None
+
     # -- plumbing ------------------------------------------------------------
     def _url(self, path: str) -> str:
-        return f"http://{self.ip}:{self.port}/control/api/v1{path}"
+        return f"{self._scheme}://{self.ip}:{self.port}/control/api/v1{path}"
 
     def _request_sync(self, method: str, path: str, payload: dict | None = None) -> dict | None:
         data = json.dumps(payload).encode() if payload is not None else None
         request = urllib.request.Request(self._url(path), data=data, method=method)
         if data is not None:
             request.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S) as response:
+        if self._auth_header is not None:
+            request.add_header("Authorization", self._auth_header)
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_S, context=self._ssl_context) as response:
             body = response.read()
         if not body:
             return None

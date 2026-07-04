@@ -104,3 +104,46 @@ def test_reacquired_target_after_weak_returns_to_locked(monkeypatch):
     engine.update(FRAME)
     assert engine.state == TargetState.LOCKED
     assert engine.bbox == (300, 220, 120, 120)
+
+
+# -- off-thread worker (stability: CSRT update() must not run on the UI thread) --
+import time as _time  # noqa: E402
+
+
+def _wait(predicate, timeout_s: float = 1.0) -> None:
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline and not predicate():
+        _time.sleep(0.01)
+
+
+def test_submit_keeps_only_the_latest_frame():
+    engine = TrackingEngine()
+    f1 = np.zeros((4, 4, 3), np.uint8)
+    f2 = np.ones((4, 4, 3), np.uint8)
+    engine.submit(f1)
+    engine.submit(f2)
+    assert engine._take() is f2  # older frame dropped
+    assert engine._take() is None  # consumed once
+
+
+def test_worker_thread_runs_update_and_publishes_bbox():
+    engine = TrackingEngine()
+    engine.select_at(FRAME, 320, 240)
+    fake = MagicMock()
+    fake.update.return_value = (True, (100, 110, 120, 120))
+    engine._tracker = fake
+    engine.start()
+    try:
+        engine.submit(FRAME)
+        _wait(lambda: engine.bbox == (100, 110, 120, 120))
+    finally:
+        engine.stop()
+    assert engine.bbox == (100, 110, 120, 120)
+    assert engine.state == TargetState.LOCKED
+
+
+def test_stop_joins_the_worker_thread():
+    engine = TrackingEngine()
+    engine.start()
+    engine.stop()
+    assert engine._worker_thread is None

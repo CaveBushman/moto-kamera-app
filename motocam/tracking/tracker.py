@@ -11,6 +11,7 @@ robustness and falls back to "lost" if confidence drops.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import cv2
@@ -25,11 +26,34 @@ LOST_AFTER_S = 2.5
 
 
 class TrackingEngine:
+    """CSRT tracker with the heavy per-frame update() driven off the UI
+    thread.
+
+    update() on a 1080p frame is tens of milliseconds -- far too much to
+    run on the Qt frame callback ~30x/s. Instead the UI thread calls
+    submit() (cheap: stash the latest frame, drop any older one) and an
+    internal worker thread runs update(). The cv2 tracker object is NOT
+    thread-safe, so all access to it (init/update/clear) is serialized by
+    `_lock`; the *published* result (`_bbox`, `_state`) is read lock-free
+    by the UI/PID via atomic attribute reads. `_lock` is deliberately NOT
+    the same lock submit() uses -- submit() must never block behind a slow
+    update(), or we'd just move the stall back onto the UI thread.
+
+    update() also still works when called directly and synchronously (as
+    the unit tests do); the worker is optional and started via start().
+    """
+
     def __init__(self):
         self._tracker: cv2.Tracker | None = None
         self._bbox: tuple[int, int, int, int] | None = None
         self._state: TargetState = TargetState.IDLE
         self._last_good_time: float | None = None
+        self._lock = threading.Lock()  # guards the cv2 tracker + published state
+        self._frame_lock = threading.Lock()  # guards only the latest-frame handoff
+        self._frame_latest: np.ndarray | None = None
+        self._wake = threading.Event()
+        self._worker_thread: threading.Thread | None = None
+        self._running = False
 
     @property
     def state(self) -> TargetState:
@@ -64,41 +88,88 @@ class TrackingEngine:
         logger.info("Target auto-acquired from detection at (%d, %d, %d, %d)", bx, by, bw, bh)
 
     def _start(self, frame: np.ndarray, box: tuple[int, int, int, int]) -> None:
-        self._tracker = self._new_tracker()
-        self._tracker.init(frame, box)
-        self._bbox = box
-        self._state = TargetState.LOCKED
-        self._last_good_time = time.monotonic()
+        with self._lock:
+            self._tracker = self._new_tracker()
+            self._tracker.init(frame, box)
+            self._bbox = box
+            self._state = TargetState.LOCKED
+            self._last_good_time = time.monotonic()
 
     def clear(self) -> None:
-        self._tracker = None
-        self._bbox = None
-        self._state = TargetState.IDLE
-        self._last_good_time = None
+        with self._lock:
+            self._tracker = None
+            self._bbox = None
+            self._state = TargetState.IDLE
+            self._last_good_time = None
 
     def update(self, frame: np.ndarray) -> None:
-        if self._tracker is None:
-            return
+        with self._lock:
+            if self._tracker is None:
+                return
 
-        ok, box = self._tracker.update(frame)
-        now = time.monotonic()
-        if ok:
-            self._bbox = tuple(int(v) for v in box)
-            self._last_good_time = now
-            self._state = TargetState.LOCKED
-            return
+            ok, box = self._tracker.update(frame)
+            now = time.monotonic()
+            if ok:
+                self._bbox = tuple(int(v) for v in box)
+                self._last_good_time = now
+                self._state = TargetState.LOCKED
+                return
 
-        assert self._last_good_time is not None
-        age = now - self._last_good_time
-        if age < WEAK_AFTER_S:
-            self._state = TargetState.LOCKED
-        elif age < LOST_AFTER_S:
-            self._state = TargetState.WEAK
-        else:
-            self._state = TargetState.MANUAL_REQUIRED
-            self._bbox = None
-            self._tracker = None
-            logger.info("Target lost, manual re-selection required")
+            assert self._last_good_time is not None
+            age = now - self._last_good_time
+            if age < WEAK_AFTER_S:
+                self._state = TargetState.LOCKED
+            elif age < LOST_AFTER_S:
+                self._state = TargetState.WEAK
+            else:
+                self._state = TargetState.MANUAL_REQUIRED
+                self._bbox = None
+                self._tracker = None
+                logger.info("Target lost, manual re-selection required")
+
+    # -- off-thread driver ---------------------------------------------------
+    def submit(self, frame: np.ndarray) -> None:
+        """Hand the newest frame to the worker (drops any older un-processed
+        one). Cheap and non-blocking -- safe to call from the UI frame
+        callback every frame."""
+        with self._frame_lock:
+            self._frame_latest = frame
+        self._wake.set()
+
+    def _take(self) -> np.ndarray | None:
+        with self._frame_lock:
+            frame = self._frame_latest
+            self._frame_latest = None
+        return frame
+
+    def start(self) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return
+        self._running = True
+        self._worker_thread = threading.Thread(target=self._worker_loop, name="tracker", daemon=True)
+        self._worker_thread.start()
+
+    def _worker_loop(self) -> None:
+        while self._running:
+            self._wake.wait()
+            if not self._running:
+                break
+            self._wake.clear()
+            frame = self._take()
+            if frame is None:
+                continue
+            try:
+                self.update(frame)
+            except Exception as exc:  # noqa: BLE001 -- a bad frame must not kill tracking
+                logger.warning("tracker update failed: %s", exc)
+
+    def stop(self) -> None:
+        self._running = False
+        self._wake.set()
+        thread = self._worker_thread
+        self._worker_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
 
     def error_from_center(self, frame_shape: tuple[int, int]) -> tuple[float, float] | None:
         """Pixel error of target center vs. frame center (desired composition point)."""

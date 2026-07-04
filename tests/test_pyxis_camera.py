@@ -103,6 +103,7 @@ class _MockPyxisHandler(BaseHTTPRequestHandler):
         "/control/api/v1/system/format": {"frameRate": "25"},
     }
     seen_auth: list = []
+    seen_puts: list = []  # (path, content_type, body)
 
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler API)
         type(self).seen_auth.append(self.headers.get("Authorization"))
@@ -118,13 +119,36 @@ class _MockPyxisHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def do_PUT(self):  # noqa: N802 (BaseHTTPRequestHandler API)
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b""
+        type(self).seen_puts.append((self.path, self.headers.get("Content-Type"), body))
+        self.send_response(204)
+        self.end_headers()
+
     def log_message(self, *args):  # silence test server
         pass
+
+
+def test_autofocus_sends_empty_json_body(mock_pyxis):
+    # The live PYXIS firmware rejects a bodyless doAutoFocus PUT with 400;
+    # it needs an empty JSON object + Content-Type. Guard that contract.
+    host, port = mock_pyxis
+    backend = PyxisCameraBackend(ip=host, port=port)
+
+    asyncio.run(backend.trigger_autofocus())
+
+    puts = _MockPyxisHandler.seen_puts
+    assert any(path.endswith("/lens/focus/doAutoFocus") for path, _, _ in puts)
+    path, content_type, body = next(p for p in puts if p[0].endswith("doAutoFocus"))
+    assert body == b"{}"
+    assert content_type == "application/json"
 
 
 @pytest.fixture
 def mock_pyxis():
     _MockPyxisHandler.seen_auth = []
+    _MockPyxisHandler.seen_puts = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _MockPyxisHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

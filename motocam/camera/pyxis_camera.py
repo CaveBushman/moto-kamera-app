@@ -268,7 +268,11 @@ class PyxisCameraBackend(CameraBackend):
 
     async def trigger_autofocus(self) -> None:
         try:
-            await self._request("PUT", "/lens/focus/doAutoFocus")
+            # This firmware requires a JSON body (an empty object) plus the
+            # Content-Type header even on this parameterless action PUT -- a
+            # bodyless PUT returns 400. Verified against a live PYXIS 6K with
+            # an L-mount AF lens: {} -> 204, no body -> 400.
+            await self._request("PUT", "/lens/focus/doAutoFocus", {})
         except urllib.error.HTTPError:
             logger.warning("PYXIS autofocus endpoint unavailable (manual lens?)")
 

@@ -286,41 +286,44 @@ class PreviewView(QFrame):
         self._frame_size = (w, h)
 
         image = QImage(frame.data, w, h, frame.strides[0], QImage.Format.Format_BGR888)
-        pixmap = QPixmap.fromImage(image)
+        # Keep the clean, unannotated full-res pixmap: the tracking rectangle
+        # is drawn onto the (much smaller) scaled copy in _render_scaled, not
+        # onto a full-res copy of every frame. That drops a ~2 MP QPixmap
+        # copy + allocation per tracked frame off the UI thread.
+        self._last_pixmap = QPixmap.fromImage(image)
+        self._render_scaled()
 
-        if self._bbox is not None:
-            pixmap = pixmap.copy()
-            painter = QPainter(pixmap)
-            color_map = {
-                "locked": QColor("#3ddc84"),
-                "weak": QColor("#ffb020"),
-                "manual_required": QColor("#ff4d4d"),
-            }
-            pen = QPen(color_map.get(self._target_state, QColor("#808892")), 3)
-            painter.setPen(pen)
-            bx, by, bw, bh = self._bbox
-            painter.drawRect(bx, by, bw, bh)
-            painter.end()
-
-        self._last_pixmap = pixmap
-        self._image_label.setPixmap(
-            pixmap.scaled(
-                self._image_label.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
+    def _render_scaled(self) -> None:
+        """Scale the last frame to the label and draw the tracking box on the
+        scaled pixmap (coords mapped from frame space). Called per frame and
+        on resize."""
+        if self._last_pixmap is None:
+            return
+        scaled = self._last_pixmap.scaled(
+            self._image_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
+        if self._bbox is not None and self._frame_size is not None:
+            fw, fh = self._frame_size
+            if fw > 0 and fh > 0:
+                sx = scaled.width() / fw
+                sy = scaled.height() / fh
+                color_map = {
+                    "locked": QColor("#3ddc84"),
+                    "weak": QColor("#ffb020"),
+                    "manual_required": QColor("#ff4d4d"),
+                }
+                painter = QPainter(scaled)
+                painter.setPen(QPen(color_map.get(self._target_state, QColor("#808892")), 3))
+                bx, by, bw, bh = self._bbox
+                painter.drawRect(int(bx * sx), int(by * sy), int(bw * sx), int(bh * sy))
+                painter.end()
+        self._image_label.setPixmap(scaled)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)
-        if self._last_pixmap is not None:
-            self._image_label.setPixmap(
-                self._last_pixmap.scaled(
-                    self._image_label.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
+        self._render_scaled()
         self._reposition_layout()
 
     def _reposition_layout(self) -> None:

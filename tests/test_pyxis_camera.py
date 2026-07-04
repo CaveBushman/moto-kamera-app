@@ -13,7 +13,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from motocam.camera.pyxis_camera import PyxisCameraBackend, format_shutter, parse_iris, parse_shutter
+from motocam.camera.pyxis_camera import (
+    PyxisCameraBackend,
+    format_iris,
+    format_shutter,
+    parse_iris,
+    parse_shutter,
+)
 
 
 def test_parse_shutter_speed_fraction():
@@ -44,6 +50,13 @@ def test_parse_iris_accepts_common_spellings():
     assert parse_iris("F/4.0") == {"apertureStop": 4.0}
     assert parse_iris("5.6") == {"apertureStop": 5.6}
     assert parse_iris("wide open") is None
+
+
+def test_format_iris_from_live_payload():
+    # /lens/iris returns several fields; we display apertureStop as f/N.N
+    assert format_iris({"apertureStop": 1.4, "apertureNumber": 128, "normalised": 0.0}) == "f/1.4"
+    assert format_iris({"apertureStop": 8.0}) == "f/8.0"
+    assert format_iris({}) is None
 
 
 def test_rest_url_layout():
@@ -99,6 +112,7 @@ class _MockPyxisHandler(BaseHTTPRequestHandler):
         "/control/api/v1/video/iso": {"iso": 800},
         "/control/api/v1/video/whiteBalance": {"whiteBalance": 5600},
         "/control/api/v1/video/shutter": {"shutterSpeed": 50},
+        "/control/api/v1/lens/iris": {"apertureStop": 2.8, "apertureNumber": 128},
         "/control/api/v1/media/active": {"remainingRecordTime": 1800},
         "/control/api/v1/system/format": {"frameRate": "25"},
     }
@@ -176,6 +190,7 @@ def test_connect_and_get_state_against_mock(mock_pyxis):
     assert state.iso == 800
     assert state.white_balance == 5600
     assert state.shutter == "1/50"
+    assert state.iris == "f/2.8"
     assert state.media_remaining_min == pytest.approx(30.0)
     assert state.fps == pytest.approx(25.0)
 

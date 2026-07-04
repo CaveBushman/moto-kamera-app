@@ -87,6 +87,14 @@ def parse_iris(iris: str) -> dict | None:
         return None
 
 
+def format_iris(value: dict) -> str | None:
+    """REST /lens/iris payload -> the app's display string ("f/2.8")."""
+    stop = value.get("apertureStop")
+    if stop is None:
+        return None
+    return f"f/{float(stop):.1f}"
+
+
 class PyxisCameraBackend(CameraBackend):
     source = "pyxis-rest"
 
@@ -230,6 +238,10 @@ class PyxisCameraBackend(CameraBackend):
         shutter = await self._try_get("/video/shutter")
         if shutter is not None:
             state.shutter = format_shutter(shutter)
+
+        iris = await self._try_get("/lens/iris")
+        if iris is not None:
+            state.iris = format_iris(iris)
 
         media = await self._try_get("/media/active")
         if media is not None and media.get("remainingRecordTime") is not None:

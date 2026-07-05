@@ -470,6 +470,9 @@ class MainWindow(QMainWindow):
     def _on_detections(self, detections: list) -> None:
         """Latest detections from the off-thread AI worker (queued signal)."""
         self._latest_detections = detections
+        # Drive the peloton tracker (ByteTrack) and refresh a locked rider's
+        # box -- keeps a specific rider through occlusion in a bunch.
+        self.tracker.update_detections(detections)
 
     def _make_preview_relay_frame(self, frame: np.ndarray) -> np.ndarray:
         h, w = frame.shape[:2]

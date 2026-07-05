@@ -49,7 +49,11 @@ def build_gimbal_backend(gimbal_cfg: dict[str, Any]) -> GimbalBackend:
                     device=str(gimbal_cfg.get("uart_device", "/dev/ttyAMA0")),
                     baudrate=int(gimbal_cfg.get("uart_baudrate", 115200)),
                 )
-            return DjiRs4ProBackend(transport)
+            return DjiRs4ProBackend(
+                transport,
+                max_pan_speed=float(gimbal_cfg.get("max_pan_speed", 20.0)),
+                max_tilt_speed=float(gimbal_cfg.get("max_tilt_speed", 12.0)),
+            )
         except RuntimeError as exc:
             logger.warning("R SDK transport unavailable (%s) -- falling back to mock gimbal", exc)
 

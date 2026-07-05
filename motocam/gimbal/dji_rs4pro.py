@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from motocam.gimbal.base import GimbalBackend
-from motocam.gimbal.dji_duml import DjiDumlAssembler
+from motocam.gimbal.dji_duml import DjiDumlAssembler, build_joystick_frame
 from motocam.gimbal.rsdk_protocol import (
     FrameAssembler,
     build_get_position,
@@ -447,18 +447,26 @@ class BleTransport:
 
 
 class DjiRs4ProBackend(GimbalBackend):
-    def __init__(self, transport) -> None:
+    def __init__(self, transport, max_pan_speed: float = 20.0, max_tilt_speed: float = 12.0) -> None:
         self.transport = transport
+        # Needed to normalize deg/s into the DUML joystick's [-1, 1] ratio
+        # (see build_joystick_frame) -- GimbalController clamps to these same
+        # max speeds before calling set_velocity, so a full-deflection
+        # request maps to a full-deflection joystick channel value.
+        self.max_pan_speed = max(1e-6, max_pan_speed)
+        self.max_tilt_speed = max(1e-6, max_tilt_speed)
         self._connected = False
         self._sequence = 0
         self._assembler = FrameAssembler()
         self._last_connect_attempt = 0.0
         self._last_orientation = (0.0, 0.0, 0.0)
         self._connect_lock = asyncio.Lock()
-        # BLE speaks DUML (0x55); CAN/UART speak the R SDK (0xAA). The DUML
-        # command payloads aren't decoded yet (need a write-side capture),
-        # so on BLE we prove the link from the gimbal's own DUML telemetry
-        # push and honestly no-op control until it's reverse-engineered.
+        # BLE speaks DUML (0x55); CAN/UART speak the R SDK (0xAA). set_velocity
+        # over DUML sends the reverse-engineered joystick command (cmd_set
+        # 0x04, cmd_id 0x01 -- see dji_duml.build_joystick_frame, decoded from
+        # a PacketLogger capture of the Ronin app and confirmed live against
+        # real hardware: chA=tilt +up/-down, chC=pan +right/-left). Recenter
+        # (go_home) is NOT decoded yet -- that stays an honest no-op.
         self._protocol = getattr(transport, "protocol", "rsdk")
         self._duml_assembler = DjiDumlAssembler()
         self._ble_control_warned = False
@@ -513,8 +521,8 @@ class DjiRs4ProBackend(GimbalBackend):
                     return
                 self._connected = True
                 logger.info(
-                    "DJI RS 4 Pro connected via %s (DUML telemetry OK). NOTE: BLE control "
-                    "commands are not decoded yet -- movement is disabled on this transport.",
+                    "DJI RS 4 Pro connected via %s (DUML telemetry OK). Joystick velocity "
+                    "control is live; recenter (HOME/RESET) is not decoded yet on this transport.",
                     label,
                 )
                 return
@@ -573,7 +581,14 @@ class DjiRs4ProBackend(GimbalBackend):
         if not self._connected:
             return
         if self._protocol == "duml":
-            self._warn_ble_control_once()
+            ratio_pan = max(-1.0, min(1.0, pan_deg_s / self.max_pan_speed))
+            ratio_tilt = max(-1.0, min(1.0, tilt_deg_s / self.max_tilt_speed))
+            frame = build_joystick_frame(self._next_sequence(), ch_a=ratio_tilt, ch_c=ratio_pan)
+            try:
+                await self._call_transport("send", frame)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("BLE joystick send failed (%s), marking disconnected", exc)
+                self._connected = False
             return
         frame = build_speed_control(self._next_sequence(), pan_deg_s, tilt_deg_s)
         try:
@@ -635,9 +650,10 @@ class DjiRs4ProBackend(GimbalBackend):
     def _warn_ble_control_once(self) -> None:
         if not self._ble_control_warned:
             logger.warning(
-                "Gimbal control over BLE is not available yet: the RS 4 Pro's DUML "
-                "command frames are not reverse-engineered (need a write-side capture). "
-                "Use the RSA port (CAN/UART) for control, or see docs/RS4_BLE_FINDINGS.md."
+                "Recenter (HOME/RESET) over BLE is not available yet: only the joystick "
+                "velocity command (cmd_set 0x04, cmd_id 0x01) has been reverse-engineered "
+                "so far, not a recenter/position command. Use RESET via the RSA port "
+                "(CAN/UART), or see docs/RS4_BLE_FINDINGS.md."
             )
             self._ble_control_warned = True
 

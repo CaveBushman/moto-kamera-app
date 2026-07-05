@@ -20,13 +20,29 @@ GATT stream speaks DJI's DUML protocol:
     -2   CRC-16 of bytes[0:-2] (LE, init 0x3692, reflected poly 0x8408)
 
 Both CRCs validated against all 615 frames of the capture, so frames
-built here carry checksums the gimbal accepts. This module owns *framing*
-only; the specific command payloads (set speed / position) still need a
-write-side capture to pin down -- this capture is telemetry the gimbal
-pushes, not the app's commands.
+built here carry checksums the gimbal accepts.
+
+Control command (joystick) reverse-engineered from a PacketLogger capture
+of the DJI Ronin app's own BLE writes while dragging its on-screen
+joystick (see docs/RS4_BLE_FINDINGS.md for the full analysis). The app
+sends, continuously (~15-20 Hz) while any axis is off-center:
+
+    sender=0x00, receiver=0x04 (gimbal), cmd_type=0x00 (request),
+    cmd_set=0x04, cmd_id=0x01, 9-byte payload:
+        [chA uint16 LE] [chB uint16 LE] [chC uint16 LE] [00 00] [02]
+
+Each channel is centered at 1024 (rest/zero); the capture showed one
+channel sweep smoothly between ~386 and ~1683 (held at each extreme),
+and a second between ~364 and ~1680 -- symmetric ~1024 +/- 660, so that
+660-wide half-range is the empirically *proven safe* deflection (rather
+than assuming the theoretical 0..2047 11-bit full range). The third
+channel stayed at 1024 (untouched) throughout -- its axis, and which of
+chA/chC is pan vs. tilt, still needs live confirmation against real
+hardware.
 """
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 
 DUML_SOF = 0x55
@@ -182,3 +198,43 @@ def build_duml_frame(
         cmd_type & 0xFF, cmd_set & 0xFF, cmd_id & 0xFF,
     ]) + bytes(payload)
     return body + duml_crc16(body).to_bytes(2, "little")
+
+
+# -- BLE joystick control (cmd_set 0x04, cmd_id 0x01) --------------------
+CMD_ID_JOYSTICK = 0x01
+JOYSTICK_SENDER = 0x00
+JOYSTICK_RECEIVER = 0x04
+JOYSTICK_CENTER = 1024
+# Proven-safe half-range from the capture (channel swept ~364..1683 and
+# ~364..1680, i.e. 1024 +/- ~660) -- deliberately not the theoretical
+# 0..2047 11-bit full range, which was never observed and could be
+# clamped/rejected differently by the gimbal.
+JOYSTICK_SPAN = 660
+JOYSTICK_MIN = JOYSTICK_CENTER - JOYSTICK_SPAN
+JOYSTICK_MAX = JOYSTICK_CENTER + JOYSTICK_SPAN
+
+
+def joystick_channel_value(ratio: float) -> int:
+    """ratio in [-1, 1] -> DUML joystick channel value, centered at 1024,
+    clamped to the empirically proven-safe range."""
+    ratio = max(-1.0, min(1.0, ratio))
+    value = JOYSTICK_CENTER + round(ratio * JOYSTICK_SPAN)
+    return max(JOYSTICK_MIN, min(JOYSTICK_MAX, value))
+
+
+def build_joystick_frame(seq: int, ch_a: float, ch_c: float, ch_b: float = 0.0) -> bytes:
+    """RS 4 Pro BLE gimbal joystick control frame. ch_a/ch_b/ch_c are
+    ratios in [-1, 1]; axis assignment (which channel is pan/tilt/roll)
+    is not yet confirmed against real hardware -- see
+    docs/RS4_BLE_FINDINGS.md."""
+    payload = struct.pack(
+        "<HHH",
+        joystick_channel_value(ch_a),
+        joystick_channel_value(ch_b),
+        joystick_channel_value(ch_c),
+    ) + b"\x00\x00\x02"
+    return build_duml_frame(
+        sender=JOYSTICK_SENDER, receiver=JOYSTICK_RECEIVER, seq=seq,
+        cmd_type=0x00, cmd_set=CMD_SET_GIMBAL, cmd_id=CMD_ID_JOYSTICK,
+        payload=payload,
+    )

@@ -6,12 +6,17 @@ video:
   fps: 30
 ai:
   type: hailo
-  model: /opt/motorcam/models/cyclist_yolo.hef
+  model: models/yolov8n.hef   # stock COCO model (scripts/setup_hailo.sh fetches
+                              # this) -- no "cyclist" class yet, so target_class
+                              # is "bicycle" for now. Swap to a custom
+                              # cyclist-trained .hef + target_class: cyclist
+                              # once one is trained (see docs/HAILO_SETUP.md).
   confidence: 0.35
   max_fps: 30.0
   infer_timeout_ms: 500
-  target_class: cyclist
-  labels: null
+  target_class: bicycle      # COCO has no "cyclist" class; bicycle is the
+                              # closest stock detection for FULL-AI auto-acquire
+  labels: null                # null = default COCO class order
 gimbal:
   type: dji_rs4_pro
   connection: ble

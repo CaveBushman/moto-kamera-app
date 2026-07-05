@@ -34,7 +34,9 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -298,6 +300,20 @@ class BleTransport:
         except asyncio.TimeoutError:
             return b""
 
+    async def drain(self) -> bytes:
+        """Non-blocking: return everything currently queued and empty it.
+        Used on the DUML (BLE) path, which streams telemetry continuously
+        and would otherwise grow the notify queue unbounded."""
+        if self._queue is None:
+            return b""
+        out = bytearray()
+        while True:
+            try:
+                out += self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        return bytes(out)
+
     async def _scan_for_device(self):
         devices = await scan_ble_devices(name_filter=self.name, timeout_s=self.scan_timeout_s)
         needle = _normalize_ble_match_text(self.name)
@@ -446,6 +462,12 @@ class DjiRs4ProBackend(GimbalBackend):
         self._protocol = getattr(transport, "protocol", "rsdk")
         self._duml_assembler = DjiDumlAssembler()
         self._ble_control_warned = False
+        # Optional: dump received DUML telemetry to a JSONL for offline
+        # decode (set MOTOCAM_DUML_CAPTURE=/path). Lets you capture a moving
+        # gimbal through the app itself -- no separate BLE connection that
+        # would collide with the app's.
+        self._duml_capture_path = os.environ.get("MOTOCAM_DUML_CAPTURE")
+        self._duml_frame_count = 0
 
     def _next_sequence(self) -> int:
         self._sequence = (self._sequence + 1) & 0xFFFF
@@ -574,14 +596,41 @@ class DjiRs4ProBackend(GimbalBackend):
             self._connected = False
 
     async def get_orientation(self) -> tuple[float, float, float]:
+        if not self._connected:
+            return self._last_orientation
         # DUML (BLE): the angle payload isn't decoded yet (needs a moving
         # capture), so don't send an R SDK query the gimbal ignores and
-        # don't fake a reading -- orientation stays at the last value.
-        if self._connected and self._protocol != "duml":
-            orientation = await self._query_position()
-            if orientation is not None:
-                self._last_orientation = orientation
+        # don't fake a reading. But DO drain the notify stream so the queue
+        # can't grow unbounded, and optionally log frames for offline decode.
+        if self._protocol == "duml":
+            await self._drain_duml_telemetry()
+            return self._last_orientation
+        orientation = await self._query_position()
+        if orientation is not None:
+            self._last_orientation = orientation
         return self._last_orientation
+
+    async def _drain_duml_telemetry(self) -> None:
+        chunk = await self._call_transport("drain")
+        if not chunk:
+            return
+        for frame in self._duml_assembler.feed(chunk):
+            self._duml_frame_count += 1
+            self._record_duml_frame(frame)
+
+    def _record_duml_frame(self, frame) -> None:
+        if not self._duml_capture_path:
+            return
+        try:
+            with open(self._duml_capture_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "t": time.time(),
+                    "cmd_set": frame.cmd_set,
+                    "cmd_id": frame.cmd_id,
+                    "hex": frame.to_bytes().hex(),
+                }) + "\n")
+        except OSError as exc:
+            logger.debug("DUML capture write failed: %s", exc)
 
     def _warn_ble_control_once(self) -> None:
         if not self._ble_control_warned:

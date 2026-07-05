@@ -209,6 +209,10 @@ class DumlTelemetryTransport:
         chunk, self._pending = self._pending[:8], self._pending[8:]
         return chunk
 
+    async def drain(self) -> bytes:
+        rest, self._pending = self._pending, b""
+        return rest
+
 
 def test_ble_duml_connects_from_telemetry_without_sending():
     transport = DumlTelemetryTransport()
@@ -235,3 +239,30 @@ def test_ble_duml_no_telemetry_stays_disconnected():
     backend = DjiRs4ProBackend(transport)
     asyncio.run(backend.connect())
     assert backend.connected is False
+
+
+def test_ble_duml_get_orientation_drains_and_counts_frames():
+    transport = DumlTelemetryTransport()
+    backend = DjiRs4ProBackend(transport)
+    asyncio.run(backend.connect())
+    frame = "551204c70402719500042700800000002014"
+    transport._pending = bytes.fromhex(frame) * 3  # three telemetry frames queued
+    asyncio.run(backend.get_orientation())
+    assert backend._duml_frame_count >= 3
+    # the notify stream was drained (no unbounded growth)
+    assert asyncio.run(transport.drain()) == b""
+
+
+def test_ble_duml_capture_writes_frames_when_env_set(tmp_path, monkeypatch):
+    out = tmp_path / "duml_capture.jsonl"
+    monkeypatch.setenv("MOTOCAM_DUML_CAPTURE", str(out))
+    transport = DumlTelemetryTransport()
+    backend = DjiRs4ProBackend(transport)  # reads env at construction
+    asyncio.run(backend.connect())
+    transport._pending = bytes.fromhex("551204c70402719500042700800000002014") * 2
+    asyncio.run(backend.get_orientation())
+    lines = out.read_text().strip().splitlines()
+    assert len(lines) >= 2
+    import json as _json
+    row = _json.loads(lines[0])
+    assert row["cmd_set"] == 0x04 and row["cmd_id"] == 0x27 and "hex" in row

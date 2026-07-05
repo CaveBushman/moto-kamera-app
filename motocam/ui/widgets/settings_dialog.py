@@ -50,7 +50,7 @@ GIMBAL_CONNECTIONS = [
     ("DJI R SDK UART", "uart"),
 ]
 DEFAULT_CONTROL_ROOM_PORT = 8765
-DEFAULT_PYXIS_PORT = 9993
+DEFAULT_CAMERA_REST_PORT = 9993
 
 
 class DeviceScanWorker(QThread):
@@ -98,7 +98,7 @@ class SettingsDialog(QDialog):
     ai_max_fps_changed = pyqtSignal(float)
 
     connection_apply_requested = pyqtSignal(str, str)  # (unit_id, control_room_url)
-    pyxis_apply_requested = pyqtSignal(str, int)  # (ip, port)
+    camera_apply_requested = pyqtSignal(str, int)  # (ip, port)
     audio_apply_requested = pyqtSignal(object, object)  # input_device, output_device
     video_device_apply_requested = pyqtSignal(object)  # device (int index or /dev/videoN path)
     gimbal_apply_requested = pyqtSignal(object)  # gimbal config dict
@@ -324,7 +324,7 @@ class SettingsDialog(QDialog):
         note = QLabel(
             "The live preview feed comes from a UVC/V4L2 capture device (e.g. "
             "a Magewell HDMI/SDI grabber on the field unit, or a webcam for "
-            "desk testing) -- separate from the PYXIS IP control link above, "
+            "desk testing) -- separate from the camera's REST IP control link above, "
             "which only handles exposure/lens commands."
         )
         note.setWordWrap(True)
@@ -577,9 +577,10 @@ class SettingsDialog(QDialog):
         outer = QVBoxLayout(group)
 
         note = QLabel(
-            "Blackmagic PYXIS 6K REST control is applied live. Individual "
-            "camera or lens endpoints may report unavailable depending on "
-            "firmware and attached lens."
+            "Blackmagic Camera Control REST is applied live (PYXIS, Studio "
+            "Cameras, Micro Studio Camera 4K G2, ...). Individual camera or "
+            "lens endpoints may report unavailable depending on firmware "
+            "and attached lens."
         )
         note.setWordWrap(True)
         outer.addWidget(note)
@@ -587,18 +588,18 @@ class SettingsDialog(QDialog):
         conn_form = QFormLayout()
         outer.addLayout(conn_form)
 
-        self.pyxis_ip_edit = QLineEdit()
-        self.pyxis_ip_edit.setPlaceholderText("192.168.9.20")
-        conn_form.addRow("PYXIS 6K IP", self.pyxis_ip_edit)
+        self.camera_ip_edit = QLineEdit()
+        self.camera_ip_edit.setPlaceholderText("192.168.9.20")
+        conn_form.addRow("Camera IP", self.camera_ip_edit)
 
-        self.pyxis_port_spin = QSpinBox()
-        self.pyxis_port_spin.setRange(1, 65535)
-        self.pyxis_port_spin.setValue(DEFAULT_PYXIS_PORT)
-        conn_form.addRow("PYXIS 6K port", self.pyxis_port_spin)
+        self.camera_port_spin = QSpinBox()
+        self.camera_port_spin.setRange(1, 65535)
+        self.camera_port_spin.setValue(DEFAULT_CAMERA_REST_PORT)
+        conn_form.addRow("Camera port", self.camera_port_spin)
 
-        pyxis_apply_btn = QPushButton("SAVE PYXIS ADDRESS")
-        pyxis_apply_btn.clicked.connect(self._emit_pyxis_apply)
-        conn_form.addRow(pyxis_apply_btn)
+        camera_apply_btn = QPushButton("SAVE CAMERA ADDRESS")
+        camera_apply_btn.clicked.connect(self._emit_camera_address_apply)
+        conn_form.addRow(camera_apply_btn)
 
         form = QFormLayout()
         outer.addLayout(form)
@@ -633,15 +634,15 @@ class SettingsDialog(QDialog):
         self._select(self.shutter_combo, shutter)
         self._select(self.iris_combo, iris)
 
-    def set_pyxis_values(self, ip: str, port: int) -> None:
-        self.pyxis_ip_edit.setText(ip)
-        self.pyxis_port_spin.setValue(port)
+    def set_camera_address_values(self, ip: str, port: int) -> None:
+        self.camera_ip_edit.setText(ip)
+        self.camera_port_spin.setValue(port)
 
-    def _emit_pyxis_apply(self) -> None:
-        ip = self.pyxis_ip_edit.text().strip()
+    def _emit_camera_address_apply(self) -> None:
+        ip = self.camera_ip_edit.text().strip()
         if not ip:
             return
-        self.pyxis_apply_requested.emit(ip, self.pyxis_port_spin.value())
+        self.camera_apply_requested.emit(ip, self.camera_port_spin.value())
 
     # -- AI tracking ------------------------------------------------------------
     def _build_tracking_group(self) -> QGroupBox:

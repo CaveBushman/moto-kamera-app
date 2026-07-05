@@ -100,7 +100,7 @@ class CameraTelemetry:
     media_remaining_min: float | None = None
     battery_pct: float | None = None
     # These describe the low-fps JPEG *preview relay* to the control room
-    # (design doc section 5), not the PYXIS's own SDI recording -- that's a
+    # (design doc section 5), not the camera's own SDI recording -- that's a
     # hardware-encoder path this software has no visibility into.
     # Deliberately kept separate so a
     # director never mistakes preview bandwidth for broadcast quality.

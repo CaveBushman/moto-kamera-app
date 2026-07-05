@@ -1,4 +1,5 @@
-"""Tests for the PYXIS REST backend: payload translation (the
+"""Tests for the generic Blackmagic Camera Control REST backend (PYXIS,
+Studio Cameras, Micro Studio Camera 4K G2, ...): payload translation (the
 display-string <-> REST payload mapping that silently drifts), transport
 configuration (HTTP/HTTPS + auth, added after a live PYXIS 6K was found
 serving a device TLS cert), and the connect/get_state flow against a
@@ -13,8 +14,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from motocam.camera.pyxis_camera import (
-    PyxisCameraBackend,
+from motocam.camera.bmd_rest_camera import (
+    BlackmagicRestCameraBackend,
     format_iris,
     format_shutter,
     parse_iris,
@@ -60,28 +61,28 @@ def test_format_iris_from_live_payload():
 
 
 def test_rest_url_layout():
-    backend = PyxisCameraBackend(ip="192.168.9.20", port=80)
+    backend = BlackmagicRestCameraBackend(ip="192.168.9.20", port=80)
     assert backend._url("/video/iso") == "http://192.168.9.20:80/control/api/v1/video/iso"
 
 
 def test_backend_starts_disconnected():
-    backend = PyxisCameraBackend(ip="192.168.9.20")
+    backend = BlackmagicRestCameraBackend(ip="192.168.9.20")
     assert backend.connected is False
 
 
 # -- transport configuration (HTTPS + auth) -------------------------------
 def test_tls_switches_url_scheme():
-    backend = PyxisCameraBackend(ip="10.0.0.5", port=443, use_tls=True)
+    backend = BlackmagicRestCameraBackend(ip="10.0.0.5", port=443, use_tls=True)
     assert backend._url("/system") == "https://10.0.0.5:443/control/api/v1/system"
 
 
 def test_auth_header_bearer_preferred_over_basic():
-    backend = PyxisCameraBackend(ip="10.0.0.5", auth_token="tok", username="u", password="p")
+    backend = BlackmagicRestCameraBackend(ip="10.0.0.5", auth_token="tok", username="u", password="p")
     assert backend._auth_header == "Bearer tok"
 
 
 def test_auth_header_basic_from_credentials():
-    backend = PyxisCameraBackend(ip="10.0.0.5", username="admin", password="secret")
+    backend = BlackmagicRestCameraBackend(ip="10.0.0.5", username="admin", password="secret")
     import base64
 
     expected = "Basic " + base64.b64encode(b"admin:secret").decode()
@@ -89,22 +90,22 @@ def test_auth_header_basic_from_credentials():
 
 
 def test_no_auth_header_by_default():
-    backend = PyxisCameraBackend(ip="10.0.0.5")
+    backend = BlackmagicRestCameraBackend(ip="10.0.0.5")
     assert backend._auth_header is None
 
 
 def test_ssl_context_only_built_for_tls():
-    assert PyxisCameraBackend(ip="x")._ssl_context is None
-    ctx = PyxisCameraBackend(ip="x", use_tls=True)._ssl_context
+    assert BlackmagicRestCameraBackend(ip="x")._ssl_context is None
+    ctx = BlackmagicRestCameraBackend(ip="x", use_tls=True)._ssl_context
     assert isinstance(ctx, ssl.SSLContext)
     # default (verify off) must not verify the self-signed device cert
     assert ctx.verify_mode == ssl.CERT_NONE
-    verifying = PyxisCameraBackend(ip="x", use_tls=True, verify_tls=True)._ssl_context
+    verifying = BlackmagicRestCameraBackend(ip="x", use_tls=True, verify_tls=True)._ssl_context
     assert verifying.verify_mode == ssl.CERT_REQUIRED
 
 
 # -- connect / get_state against a mock REST server -----------------------
-class _MockPyxisHandler(BaseHTTPRequestHandler):
+class _MockBmdRestHandler(BaseHTTPRequestHandler):
     responses = {
         "/control/api/v1/system": {"codec": "BRAW"},
         "/control/api/v1/lens/zoom": {"normalised": 0.4},
@@ -144,15 +145,15 @@ class _MockPyxisHandler(BaseHTTPRequestHandler):
         pass
 
 
-def test_autofocus_sends_empty_json_body(mock_pyxis):
+def test_autofocus_sends_empty_json_body(mock_bmd):
     # The live PYXIS firmware rejects a bodyless doAutoFocus PUT with 400;
     # it needs an empty JSON object + Content-Type. Guard that contract.
-    host, port = mock_pyxis
-    backend = PyxisCameraBackend(ip=host, port=port)
+    host, port = mock_bmd
+    backend = BlackmagicRestCameraBackend(ip=host, port=port)
 
     asyncio.run(backend.trigger_autofocus())
 
-    puts = _MockPyxisHandler.seen_puts
+    puts = _MockBmdRestHandler.seen_puts
     assert any(path.endswith("/lens/focus/doAutoFocus") for path, _, _ in puts)
     path, content_type, body = next(p for p in puts if p[0].endswith("doAutoFocus"))
     assert body == b"{}"
@@ -160,10 +161,10 @@ def test_autofocus_sends_empty_json_body(mock_pyxis):
 
 
 @pytest.fixture
-def mock_pyxis():
-    _MockPyxisHandler.seen_auth = []
-    _MockPyxisHandler.seen_puts = []
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _MockPyxisHandler)
+def mock_bmd():
+    _MockBmdRestHandler.seen_auth = []
+    _MockBmdRestHandler.seen_puts = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _MockBmdRestHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -173,9 +174,9 @@ def mock_pyxis():
         thread.join(timeout=2.0)
 
 
-def test_connect_and_get_state_against_mock(mock_pyxis):
-    host, port = mock_pyxis
-    backend = PyxisCameraBackend(ip=host, port=port)
+def test_connect_and_get_state_against_mock(mock_bmd):
+    host, port = mock_bmd
+    backend = BlackmagicRestCameraBackend(ip=host, port=port)
 
     async def run():
         await backend.connect()
@@ -195,13 +196,13 @@ def test_connect_and_get_state_against_mock(mock_pyxis):
     assert state.fps == pytest.approx(25.0)
 
 
-def test_credentials_are_sent_as_authorization_header(mock_pyxis):
-    host, port = mock_pyxis
-    backend = PyxisCameraBackend(ip=host, port=port, username="admin", password="secret")
+def test_credentials_are_sent_as_authorization_header(mock_bmd):
+    host, port = mock_bmd
+    backend = BlackmagicRestCameraBackend(ip=host, port=port, username="admin", password="secret")
 
     asyncio.run(backend.connect())
 
     import base64
 
     expected = "Basic " + base64.b64encode(b"admin:secret").decode()
-    assert expected in _MockPyxisHandler.seen_auth
+    assert expected in _MockBmdRestHandler.seen_auth

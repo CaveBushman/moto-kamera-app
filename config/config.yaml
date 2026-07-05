@@ -27,8 +27,9 @@ gimbal:
   max_pan_speed: 20
   max_tilt_speed: 12
 camera:
-  type: blackmagic_pyxis
-  ip: 192.168.9.20
+  type: blackmagic_rest   # generic Blackmagic Camera Control REST API --
+                          # PYXIS, Studio Cameras, Micro Studio Camera 4K G2, ...
+  ip: 192.168.9.20        # TODO: update to the Micro Studio Camera 4K G2's real IP
   port: 9993
   rest_port: 80
   use_tls: false

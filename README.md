@@ -1,8 +1,10 @@
 # MotoCam
 
-Motorcycle AI camera control unit for Raspberry Pi 5 + AI HAT+ + Blackmagic
-PYXIS + DJI RS 4 Pro. See `Technicky_navrh_motocyklova_AI_kamera_RPi5_PYXIS_RS4Pro.md`
-for the full technical design this implements.
+Motorcycle AI camera control unit for Raspberry Pi 5 + AI HAT+ + a
+Blackmagic camera (Micro Studio Camera 4K G2 on the gimbal; PYXIS 6K is
+too heavy for the gimbal mount, both speak the same REST API) + DJI RS 4
+Pro. See `Technicky_navrh_motocyklova_AI_kamera_RPi5_PYXIS_RS4Pro.md` for
+the full technical design this implements.
 
 Talks to the director's dashboard in the sibling
 `../08 livestream road cycling control room` project over a WebSocket link
@@ -14,8 +16,9 @@ and director talkback PTT in.
 This is a working MVP1-level app: live preview (UVC or synthetic test
 pattern), tap-to-select + OpenCV CSRT tracking, **real Hailo AI HAT+
 detection with FULL-AI auto-acquire**, DJI R SDK gimbal control,
-**real PYXIS camera control**, simulated/real GPS, and a real
-bidirectional link to the control room.
+**real Blackmagic camera control** (REST API, currently a Micro Studio
+Camera 4K G2), simulated/real GPS, and a real bidirectional link to the
+control room.
 
 - `motocam/ai/hailo_detector.py` -- REAL: YOLO object detection on the
   Raspberry Pi AI HAT+ (Hailo-8, 26 TOPS) via the HailoRT Python API
@@ -33,19 +36,22 @@ bidirectional link to the control room.
   is a one-time offline step; `ai.labels` in config gives the compiled
   model's class order (omit for a stock COCO YOLOv8/v11 HEF).
 
-- `motocam/camera/pyxis_camera.py` -- REAL: Blackmagic Camera Control
-  REST API over Ethernet (`http://<ip>/control/api/v1`, the officially
-  documented control surface for PYXIS). Record start/stop, ISO, white
-  balance, shutter (speed or angle), iris, autofocus, servo zoom
-  (velocity synthesized from position nudges -- REST has no velocity
-  endpoint), media-remaining and frame-rate readouts. Auto-reconnects
-  with a throttled probe (one `/system` GET per ~5 s while unreachable),
-  degrades per-field on endpoints a given firmware/lens doesn't serve,
-  and never blocks the UI (stdlib urllib in an executor). Selected via
-  `camera.type: blackmagic_pyxis` in config; `camera.type: mock` for
-  development without the camera. Field names should be spot-checked
-  against the firmware's own OpenAPI files on first contact with real
-  hardware; the IP is retargetable live from Settings -> Camera & Lens.
+- `motocam/camera/bmd_rest_camera.py` -- REAL: Blackmagic Camera Control
+  REST API over Ethernet (`http://<ip>/control/api/v1`), generic across
+  PYXIS, Studio Cameras, and the Micro Studio Camera 4K G2 (all the same
+  documented control surface; a USB-C-to-Ethernet adapter + firmware
+  8.6+ is needed on the Micro Studio Camera 4K G2). Record start/stop,
+  ISO, white balance, shutter (speed or angle), iris, autofocus, servo
+  zoom (velocity synthesized from position nudges -- REST has no
+  velocity endpoint), media-remaining and frame-rate readouts.
+  Auto-reconnects with a throttled probe (one `/system` GET per ~5 s
+  while unreachable), degrades per-field on endpoints a given
+  firmware/lens doesn't serve, and never blocks the UI (stdlib urllib in
+  an executor). Selected via `camera.type: blackmagic_rest` in config;
+  `camera.type: mock` for development without the camera. Field names
+  should be spot-checked against the firmware's own OpenAPI files on
+  first contact with real hardware; the IP is retargetable live from
+  Settings -> Camera & Lens.
 - `motocam/gimbal/dji_rs4pro.py` -- REAL R SDK backend for the gimbal's
   RSA port over CAN (`connection: can`, e.g. an MCP2515 HAT
   / USB-CAN adapter on the Pi at 1 Mbps, IDs 0x223/0x222) or UART
@@ -84,7 +90,7 @@ Beyond MVP1, also implemented:
 - **AF control**: a compact autofocus button beside the smaller REC button
   in the camera panel; wired through the camera controller/mock backend.
 - **Settings dialog** (`ui/widgets/settings_dialog.py`): unit ID (MOTO 1-4)
-  and control-room IP/port with live reconnect, PYXIS IP/port, gimbal
+  and control-room IP/port with live reconnect, camera IP/port, gimbal
   transport (mock/BLE/CAN/UART) with BLE UUID overrides, camera ISO/WB/
   shutter/iris, PTT input/output audio devices, and AI tracking params
   (target class, confidence, dead zone, max pan/tilt speed) -- all editable
@@ -123,7 +129,7 @@ Beyond MVP1, also implemented:
   (`video/devices.py`, `VideoEngine.set_device`), no restart needed.
 - **Preview relay bandwidth cap** (`config/config.yaml -> preview_relay`):
   the dashboard JPEG preview is downscaled and rate-limited separately
-  from the PYXIS SRT/program path, so weak uplinks are not consumed by
+  from the camera's SRT/program path, so weak uplinks are not consumed by
   control-room thumbnails.
 - **Telemetry source reporting**: every telemetry packet now carries
   whether GPS/video/camera/gimbal/AI is real hardware or fallback
@@ -214,8 +220,8 @@ PYTHONPATH=. python scripts/rs4_rsa_probe.py --transport can --channel can0
 # List visible serial/CAN candidates on the machine.
 PYTHONPATH=. python scripts/rs4_rsa_probe.py --list
 
-# PYXIS REST API.
-PYTHONPATH=. python scripts/pyxis_probe.py 192.168.9.20
+# Blackmagic Camera Control REST API (PYXIS, Studio Cameras, Micro Studio Camera 4K G2).
+PYTHONPATH=. python scripts/bmd_rest_probe.py 192.168.9.20
 
 # Hailo AI HAT+.
 PYTHONPATH=. python scripts/hailo_check.py
@@ -231,7 +237,7 @@ motocam/
   ai/         Hailo YOLO integration point (currently a NullDetector stub)
   tracking/   tap-to-select CSRT tracker + PID pan/tilt regulator
   gimbal/     abstract controller + mock backend + DJI RS 4 Pro backend
-  camera/     abstract controller + mock backend + PYXIS REST backend
+  camera/     abstract controller + mock backend + Blackmagic REST camera backend
   gps/        NMEA serial reader with simulated-fix fallback
   audio/      rider microphone PTT capture + director talkback playback +
               PortAudio device listing for Settings

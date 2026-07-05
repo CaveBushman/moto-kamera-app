@@ -1,4 +1,4 @@
-"""Software-only Blackmagic PYXIS backend for development without the camera."""
+"""Software-only Blackmagic Camera Control backend for development without the camera."""
 from __future__ import annotations
 
 import asyncio

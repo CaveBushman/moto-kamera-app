@@ -1,10 +1,14 @@
-"""Blackmagic PYXIS backend over the documented Camera Control REST API.
+"""Blackmagic camera backend over the documented Camera Control REST API.
 
-PYXIS (like the Studio Cameras and Cinema Camera 6K line) exposes
-Blackmagic's official REST control API over its Ethernet port: JSON
-endpoints under http://<camera-ip>/control/api/v1/... -- documented in
-the "Blackmagic Camera Control REST API" developer documentation. This
-implementation uses only endpoints from that documentation:
+This REST API is generic across Blackmagic's camera line -- PYXIS 6K, the
+Studio Cameras, Cinema Camera 6K, and the Micro Studio Camera 4K G2 (via a
+USB-C-to-Ethernet adapter, firmware 8.6+) all expose the same JSON
+endpoints under http://<camera-ip>/control/api/v1/..., documented in the
+"Blackmagic Camera Control REST API" developer documentation. Originally
+built and verified against a live PYXIS 6K; the gimbal-mounted camera
+later moved to a Micro Studio Camera 4K G2 (PYXIS is too heavy for the
+gimbal) with no protocol changes needed, only config.yaml's camera.ip.
+This implementation uses only endpoints from that documentation:
 
     GET  /system                      liveness / codec info
     GET/PUT /transports/0/record      {"recording": bool}
@@ -42,7 +46,7 @@ import urllib.request
 
 from motocam.camera.base import CameraBackend, CameraState
 
-logger = logging.getLogger("motocam.camera.pyxis")
+logger = logging.getLogger("motocam.camera.bmd_rest")
 
 REQUEST_TIMEOUT_S = 1.5
 RECONNECT_MIN_INTERVAL_S = 5.0
@@ -95,8 +99,8 @@ def format_iris(value: dict) -> str | None:
     return f"f/{float(stop):.1f}"
 
 
-class PyxisCameraBackend(CameraBackend):
-    source = "pyxis-rest"
+class BlackmagicRestCameraBackend(CameraBackend):
+    source = "bmd-rest"
 
     def __init__(
         self,
@@ -110,7 +114,7 @@ class PyxisCameraBackend(CameraBackend):
     ):
         """Blackmagic Camera Control REST backend.
 
-        Recent firmware (PYXIS presents a device TLS cert on :443) can serve
+        Recent firmware (some Blackmagic cameras present a device TLS cert on :443) can serve
         the control API over HTTPS and gate it behind credentials, so the
         transport is configurable:
 
@@ -198,13 +202,13 @@ class PyxisCameraBackend(CameraBackend):
             await self._request("GET", "/system")
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             if self._connected:
-                logger.warning("PYXIS at %s:%d lost: %s", self.ip, self.port, exc)
+                logger.warning("Blackmagic camera at %s:%d lost: %s", self.ip, self.port, exc)
             else:
-                logger.info("PYXIS not reachable at %s:%d (%s), will retry", self.ip, self.port, exc)
+                logger.info("Blackmagic camera not reachable at %s:%d (%s), will retry", self.ip, self.port, exc)
             self._connected = False
             return
         if not self._connected:
-            logger.info("PYXIS connected at %s:%d (REST /system OK)", self.ip, self.port)
+            logger.info("Blackmagic camera connected at %s:%d (REST /system OK)", self.ip, self.port)
         self._connected = True
         zoom = await self._try_get("/lens/zoom")
         if zoom is not None and "normalised" in zoom:
@@ -221,7 +225,7 @@ class PyxisCameraBackend(CameraBackend):
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             # The transport endpoint is core -- losing it means the camera
             # is gone, not a per-feature gap.
-            logger.warning("PYXIS state refresh failed (%s), marking disconnected", exc)
+            logger.warning("Blackmagic camera state refresh failed (%s), marking disconnected", exc)
             self._connected = False
             return CameraState(connected=False)
         if record is not None:
@@ -282,11 +286,11 @@ class PyxisCameraBackend(CameraBackend):
         try:
             # This firmware requires a JSON body (an empty object) plus the
             # Content-Type header even on this parameterless action PUT -- a
-            # bodyless PUT returns 400. Verified against a live PYXIS 6K with
+            # bodyless PUT returns 400. Verified against a live Blackmagic camera (PYXIS 6K) with
             # an L-mount AF lens: {} -> 204, no body -> 400.
             await self._request("PUT", "/lens/focus/doAutoFocus", {})
         except urllib.error.HTTPError:
-            logger.warning("PYXIS autofocus endpoint unavailable (manual lens?)")
+            logger.warning("Blackmagic camera autofocus endpoint unavailable (manual lens?)")
 
     async def set_zoom_speed(self, speed: float) -> None:
         if speed == 0.0 or self._zoom_normalised is None:
@@ -299,5 +303,5 @@ class PyxisCameraBackend(CameraBackend):
             self._zoom_normalised = target
         except urllib.error.HTTPError:
             if not self._zoom_unsupported_logged:
-                logger.warning("PYXIS lens has no servo zoom endpoint; zoom rocker inactive")
+                logger.warning("Blackmagic camera lens has no servo zoom endpoint; zoom rocker inactive")
                 self._zoom_unsupported_logged = True

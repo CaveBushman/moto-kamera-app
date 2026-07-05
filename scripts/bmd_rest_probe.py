@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Standalone PYXIS / Blackmagic Camera Control REST API probe.
+"""Standalone Blackmagic Camera Control REST API probe.
 
-Run this against a camera IP to get a clear verdict on whether the REST
-control API is actually answering -- separate from the app, so you can
-re-check after toggling settings on the camera itself.
+Generic across PYXIS, Studio Cameras, and the Micro Studio Camera 4K G2
+(the same REST API family) -- run this against a camera IP to get a
+clear verdict on whether the REST control API is actually answering,
+separate from the app, so you can re-check after toggling settings on
+the camera itself.
 
-    python scripts/pyxis_probe.py 192.168.1.185
-    python scripts/pyxis_probe.py 192.168.1.185 --port 80
+    python scripts/bmd_rest_probe.py 192.168.1.185
+    python scripts/bmd_rest_probe.py 192.168.1.185 --port 80
 
 It checks TCP reachability, identifies the device from its TLS
 certificate (Blackmagic cameras present one on 443), and probes the
@@ -87,7 +89,7 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=80)
     args = ap.parse_args()
 
-    print(f"== PYXIS REST API probe: {args.host} ==\n")
+    print(f"== Blackmagic Camera Control REST API probe: {args.host} ==\n")
 
     print("TCP reachability:")
     for p in sorted({80, 443, args.port}):

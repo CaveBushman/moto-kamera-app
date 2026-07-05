@@ -22,7 +22,7 @@ Honesty guarantee: `connected` only turns True after the gimbal has
 actually ANSWERED a GET_POSITION request with a frame that passes both
 CRCs. If anything differs on RS 4 Pro hardware, the result is a visible
 DISCONNECTED state and a log line -- never fake control. Reconnect
-probes are throttled the same way as the PYXIS backend's.
+probes are throttled the same way as the Blackmagic REST camera backend's.
 
 Protocol constants (frame codec, CRC seeds, cmd/ctrl bytes) and the CAN
 arbitration IDs below (0x223 out / 0x222 in) are verified against the

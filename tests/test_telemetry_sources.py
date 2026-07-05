@@ -9,7 +9,7 @@ def test_source_value_display_compacts_fallbacks():
 
 
 def test_source_value_display_preserves_real_backend_identity():
-    assert source_value_display("pyxis-rest") == "PYXIS-REST"
+    assert source_value_display("bmd-rest") == "BMD-REST"
     assert source_value_display("dji-rsdk-ble") == "DJI-RSDK-BLE"
 
 

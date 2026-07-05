@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import QApplication, QSplashScreen
 
 from motocam.camera.base import CameraController
 from motocam.camera.mock_camera import MockCameraBackend
-from motocam.camera.pyxis_camera import PyxisCameraBackend
+from motocam.camera.bmd_rest_camera import BlackmagicRestCameraBackend
 from motocam.core.config import load_config, resolve_config_path
 from motocam.core.logging_setup import install_crash_guard, setup_logging
 from motocam.gimbal.base import GimbalController
@@ -48,12 +48,15 @@ def build_gimbal(cfg: dict) -> GimbalController:
 def build_camera(cfg: dict) -> CameraController:
     camera_cfg = cfg.get("camera", {})
     camera_type = camera_cfg.get("type", "mock")
-    if camera_type == "blackmagic_pyxis":
-        # Real REST control (camera/pyxis_camera.py). The backend retries
-        # its /system probe on every refresh tick (throttled), so a camera
-        # that's off at app start gets picked up automatically -- no mock
-        # fallback that would fake data while looking connected.
-        backend = PyxisCameraBackend(
+    if camera_type == "blackmagic_rest":
+        # Real REST control (camera/bmd_rest_camera.py) -- generic across
+        # PYXIS, Studio Cameras, and the Micro Studio Camera 4K G2 (the
+        # current gimbal-mounted camera; PYXIS is too heavy for the
+        # gimbal). The backend retries its /system probe on every refresh
+        # tick (throttled), so a camera that's off at app start gets
+        # picked up automatically -- no mock fallback that would fake
+        # data while looking connected.
+        backend = BlackmagicRestCameraBackend(
             ip=camera_cfg.get("ip", "192.168.9.20"),
             port=int(camera_cfg.get("rest_port", 80)),
             use_tls=bool(camera_cfg.get("use_tls", False)),

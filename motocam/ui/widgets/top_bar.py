@@ -128,13 +128,16 @@ class TopBar(QWidget):
         layout.addWidget(self.unit_label)
         self.set_unit_id("moto-1")
 
-        # "VIDEO" = the UVC/V4L2 preview feed (grabber); "PYXIS" = the REST
-        # control link to the camera. They are independent -- you can have
-        # camera control up with no video grabber, or vice versa -- so they
-        # get separate chips (previously only video had one, labelled "CAM",
-        # which read as the camera control link and caused confusion).
+        # "VIDEO" = the UVC/V4L2 preview feed (grabber); "BMD" = the
+        # Blackmagic Camera Control REST link (PYXIS, Studio Cameras, Micro
+        # Studio Camera 4K G2, ... -- same generic REST API, so the chip
+        # isn't named after one specific camera). They are independent --
+        # you can have camera control up with no video grabber, or vice
+        # versa -- so they get separate chips (previously only video had
+        # one, labelled "CAM", which read as the camera control link and
+        # caused confusion).
         self.cam_chip = StatusChip("VIDEO")
-        self.pyxis_chip = StatusChip("PYXIS")
+        self.bmd_chip = StatusChip("BMD")
         self.gimbal_chip = StatusChip("GIMBAL")
         self.gps_chip = StatusChip("GPS")
         self.net_chip = StatusChip("CTRL")
@@ -145,7 +148,7 @@ class TopBar(QWidget):
         self.latency_chip = StatusChip("LAT")
 
         for chip in (
-            self.cam_chip, self.pyxis_chip, self.gimbal_chip, self.gps_chip, self.net_chip,
+            self.cam_chip, self.bmd_chip, self.gimbal_chip, self.gps_chip, self.net_chip,
             self.switcher_chip, self.rec_chip, self.ai_chip, self.fps_chip, self.latency_chip,
         ):
             layout.addWidget(chip, stretch=1)  # chips share the width evenly and fill the bar

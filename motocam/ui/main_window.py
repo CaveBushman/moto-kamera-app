@@ -214,7 +214,7 @@ class MainWindow(QMainWindow):
         # Show the REST control port (rest_port: 80/443), not the 9993
         # streaming port -- that is the only port the camera control uses.
         rest_port = int(self._config.get("camera", {}).get("rest_port", 80))
-        self._settings.set_pyxis_values(self.camera_ip, rest_port)
+        self._settings.set_camera_address_values(self.camera_ip, rest_port)
         self._settings.set_camera_values(
             self.camera.state.iso, self.camera.state.white_balance,
             self.camera.state.shutter, self.camera.state.iris,
@@ -272,7 +272,7 @@ class MainWindow(QMainWindow):
         self._settings.ai_max_fps_changed.connect(self._on_ai_max_fps_changed)
 
         self._settings.connection_apply_requested.connect(self._on_connection_apply)
-        self._settings.pyxis_apply_requested.connect(self._on_pyxis_apply)
+        self._settings.camera_apply_requested.connect(self._on_camera_address_apply)
         self._settings.audio_apply_requested.connect(self._on_audio_apply)
         self._settings.video_device_apply_requested.connect(self._on_video_device_apply)
         self._settings.gimbal_apply_requested.connect(self._on_gimbal_apply)
@@ -462,7 +462,7 @@ class MainWindow(QMainWindow):
             if ok:
                 self.link.send_preview_frame(buf.tobytes())
                 # Real measured bandwidth of the low-fps preview relay to
-                # the control room -- not the PYXIS's own recording bitrate,
+                # the control room -- not the camera's own recording bitrate,
                 # see CameraTelemetry.preview_bitrate_kbps docstring.
                 self._preview_bytes_accum += buf.nbytes
                 self._preview_resolution = f"{relay_w}x{relay_h}"
@@ -663,10 +663,10 @@ class MainWindow(QMainWindow):
         self.gimbal_panel.update_orientation(self.gimbal.pan_deg, self.gimbal.tilt_deg, self.gimbal.roll_deg)
         self.gimbal_panel.set_connected(self.gimbal.connected)
         self.camera_panel.update_state(self.camera.state)
-        # PYXIS REST control link status (independent of the VIDEO grabber).
-        # Mock camera backend always reports connected; the real PYXIS
+        # Blackmagic Camera Control REST link status (independent of the VIDEO grabber).
+        # Mock camera backend always reports connected; the real Blackmagic
         # backend reflects the live /system probe.
-        self.top_bar.pyxis_chip.set_state(
+        self.top_bar.bmd_chip.set_state(
             "ok" if self.camera.connected else "bad",
             "OK" if self.camera.connected else "DOWN",
         )
@@ -811,7 +811,7 @@ class MainWindow(QMainWindow):
         self._config.setdefault("telemetry", {})["control_room_url"] = control_room_url
         self._save_config()
 
-    def _on_pyxis_apply(self, ip: str, port: int) -> None:
+    def _on_camera_address_apply(self, ip: str, port: int) -> None:
         self.camera_ip = ip
         self.camera_port = port
         backend = self.camera.backend
@@ -826,9 +826,9 @@ class MainWindow(QMainWindow):
             backend.port = port
             backend._connected = False
             backend._last_connect_attempt = 0.0
-            logger.info("PYXIS address changed to %s:%d -- reconnecting on next refresh", ip, port)
+            logger.info("Camera address changed to %s:%d -- reconnecting on next refresh", ip, port)
         else:
-            logger.info("Saved PYXIS address %s:%d (mock camera backend active)", ip, port)
+            logger.info("Saved camera address %s:%d (mock camera backend active)", ip, port)
         camera_cfg = self._config.setdefault("camera", {})
         camera_cfg["ip"] = ip
         camera_cfg["rest_port"] = port  # this field IS the REST port now

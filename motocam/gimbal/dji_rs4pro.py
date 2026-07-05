@@ -585,6 +585,18 @@ class DjiRs4ProBackend(GimbalBackend):
         # would collide with the app's.
         self._duml_capture_path = os.environ.get("MOTOCAM_DUML_CAPTURE")
         self._duml_frame_count = 0
+        # Joystick send timing diagnostics -- reported to the Pi, control
+        # is smooth on macOS. Rather than guess again, log periodic
+        # min/avg/max for (a) the actual write_gatt_char round-trip time
+        # and (b) the interval between successive set_velocity() calls, so
+        # a real Pi run can show whether the *write* is slow (BlueZ/D-Bus,
+        # connection interval) or the *calls themselves* arrive irregularly
+        # (event loop contention from video/AI/tracking on a much weaker
+        # CPU) -- those point at very different fixes.
+        self._velocity_send_durations_ms: list[float] = []
+        self._velocity_call_gaps_ms: list[float] = []
+        self._last_velocity_call_at: float | None = None
+        self._velocity_stats_logged_at = 0.0
 
     def _next_sequence(self) -> int:
         self._sequence = (self._sequence + 1) & 0xFFFF
@@ -693,11 +705,19 @@ class DjiRs4ProBackend(GimbalBackend):
             ratio_pan = max(-1.0, min(1.0, pan_deg_s / self.max_pan_speed))
             ratio_tilt = max(-1.0, min(1.0, tilt_deg_s / self.max_tilt_speed))
             frame = build_joystick_frame(self._next_sequence(), ch_a=ratio_tilt, ch_c=ratio_pan)
+            now = time.monotonic()
+            if self._last_velocity_call_at is not None:
+                self._velocity_call_gaps_ms.append((now - self._last_velocity_call_at) * 1000.0)
+            self._last_velocity_call_at = now
+            send_start = now
             try:
                 await self._call_transport("send", frame)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("BLE joystick send failed (%s), marking disconnected", exc)
                 self._connected = False
+                return
+            self._velocity_send_durations_ms.append((time.monotonic() - send_start) * 1000.0)
+            self._log_velocity_timing_stats(now)
             return
         frame = build_speed_control(self._next_sequence(), pan_deg_s, tilt_deg_s)
         try:
@@ -705,6 +725,26 @@ class DjiRs4ProBackend(GimbalBackend):
         except Exception as exc:  # noqa: BLE001
             logger.warning("R SDK velocity send failed (%s), marking disconnected", exc)
             self._connected = False
+
+    def _log_velocity_timing_stats(self, now: float) -> None:
+        """Every ~2s, log min/avg/max for the write round-trip and the
+        inter-call gap -- a slow *write* points at BlueZ/D-Bus/connection
+        interval; an irregular *gap* points at event-loop contention on the
+        Pi (video/AI/tracking competing for a much weaker CPU than macOS)."""
+        if now - self._velocity_stats_logged_at < 2.0 or not self._velocity_send_durations_ms:
+            return
+        durations = self._velocity_send_durations_ms
+        gaps = self._velocity_call_gaps_ms
+        logger.info(
+            "BLE joystick timing (n=%d): write_ms min/avg/max=%.1f/%.1f/%.1f  "
+            "call_gap_ms min/avg/max=%s",
+            len(durations),
+            min(durations), sum(durations) / len(durations), max(durations),
+            f"{min(gaps):.1f}/{sum(gaps) / len(gaps):.1f}/{max(gaps):.1f}" if gaps else "n/a",
+        )
+        self._velocity_send_durations_ms.clear()
+        self._velocity_call_gaps_ms.clear()
+        self._velocity_stats_logged_at = now
 
     async def go_home(self) -> None:
         if not self._connected:

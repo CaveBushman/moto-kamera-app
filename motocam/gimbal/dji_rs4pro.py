@@ -164,10 +164,42 @@ class BleDeviceInfo:
         return f"{self.name} - {self.address}{signal}"
 
 
-async def scan_ble_devices(name_filter: str = "", timeout_s: float = 5.0) -> list[BleDeviceInfo]:
-    """Return visible BLE devices, with RS-name matches and strong signals first."""
-    if not BLE_AVAILABLE:
-        raise RuntimeError("bleak is not installed -- pip3 install bleak")
+# BlueZ (Linux/Raspberry Pi) allows only one discovery/connect session per
+# adapter at a time; a second one raises org.bluez.Error.InProgress rather
+# than queuing. The app has two independent sources of adapter activity --
+# the periodic auto-reconnect (BleTransport.open(), which even a
+# direct-by-address connect can trigger BlueZ-side discovery for) and the
+# operator's manual "SCAN BLE DEVICES" button in Settings -- so without a
+# shared gate they can collide. This lock serializes every adapter
+# operation across the whole process.
+_BLE_ADAPTER_LOCK = asyncio.Lock()
+_BLUEZ_IN_PROGRESS_RETRIES = 2
+_BLUEZ_IN_PROGRESS_BACKOFF_S = 0.6
+
+
+async def _retry_bluez_in_progress(coro_factory):
+    """Run an awaitable, retrying a few times if BlueZ reports another
+    adapter operation is already in progress (defense-in-depth alongside
+    _BLE_ADAPTER_LOCK, e.g. for activity outside our own lock's control)."""
+    last_exc: Exception | None = None
+    for attempt in range(_BLUEZ_IN_PROGRESS_RETRIES + 1):
+        try:
+            return await coro_factory()
+        except Exception as exc:  # noqa: BLE001 -- match on message, bleak's exception type varies
+            if "InProgress" not in str(exc) or attempt == _BLUEZ_IN_PROGRESS_RETRIES:
+                raise
+            last_exc = exc
+            logger.debug("BlueZ adapter busy (attempt %d), retrying: %s", attempt + 1, exc)
+            await asyncio.sleep(_BLUEZ_IN_PROGRESS_BACKOFF_S)
+    raise last_exc  # pragma: no cover -- loop always returns or raises above
+
+
+async def _discover_ble_device_infos(timeout_s: float) -> list[BleDeviceInfo]:
+    """Raw discovery -> BleDeviceInfo list, no locking/retry. Callers that
+    already hold _BLE_ADAPTER_LOCK (e.g. BleTransport._scan_for_device, from
+    inside BleTransport.open()'s own locked section) must call this
+    directly rather than the public scan_ble_devices() below, or they would
+    deadlock re-acquiring the (non-reentrant) lock."""
     assert BleakScanner is not None
     devices = await BleakScanner.discover(timeout=timeout_s)
     infos: list[BleDeviceInfo] = []
@@ -178,6 +210,22 @@ async def scan_ble_devices(name_filter: str = "", timeout_s: float = 5.0) -> lis
         name = str(getattr(device, "name", "") or "").strip() or "Unknown BLE device"
         rssi = getattr(device, "rssi", None)
         infos.append(BleDeviceInfo(name=name, address=address, rssi=rssi if isinstance(rssi, int) else None))
+    return infos
+
+
+async def scan_ble_devices(name_filter: str = "", timeout_s: float = 5.0) -> list[BleDeviceInfo]:
+    """Return visible BLE devices, with RS-name matches and strong signals
+    first. Public entry point (e.g. the Settings "SCAN BLE DEVICES" button)
+    -- takes the shared adapter lock and retries a transient BlueZ
+    "InProgress" busy error."""
+    if not BLE_AVAILABLE:
+        raise RuntimeError("bleak is not installed -- pip3 install bleak")
+
+    async def _discover():
+        async with _BLE_ADAPTER_LOCK:
+            return await _discover_ble_device_infos(timeout_s)
+
+    infos = await _retry_bluez_in_progress(_discover)
     return _sort_ble_device_infos(infos, name_filter)
 
 
@@ -251,9 +299,18 @@ class BleTransport:
         if self._client is not None and getattr(self._client, "is_connected", False):
             return
 
-        target = self.address or await self._scan_for_device()
-        self._client = BleakClient(target)
-        await self._client.connect(timeout=self.scan_timeout_s)
+        async def _connect():
+            # Scanning (if no explicit address) and the connect itself both
+            # share _BLE_ADAPTER_LOCK with scan_ble_devices() -- on BlueZ a
+            # direct-by-address connect can still trigger adapter-side
+            # discovery, so it must not overlap with a manual scan either.
+            async with _BLE_ADAPTER_LOCK:
+                target = self.address or await self._scan_for_device(locked=True)
+                client = BleakClient(target)
+                await client.connect(timeout=self.scan_timeout_s)
+                return client
+
+        self._client = await _retry_bluez_in_progress(_connect)
         self._adopt_negotiated_mtu()
 
         services = await self._get_services()
@@ -337,8 +394,15 @@ class BleTransport:
                 break
         return bytes(out)
 
-    async def _scan_for_device(self):
-        devices = await scan_ble_devices(name_filter=self.name, timeout_s=self.scan_timeout_s)
+    async def _scan_for_device(self, *, locked: bool = False):
+        """`locked=True` means the caller (BleTransport.open()) already
+        holds _BLE_ADAPTER_LOCK -- go straight to the no-lock raw discovery
+        instead of the public scan_ble_devices(), which would try to
+        re-acquire that same (non-reentrant) lock and deadlock."""
+        if locked:
+            devices = await _discover_ble_device_infos(self.scan_timeout_s)
+        else:
+            devices = await scan_ble_devices(name_filter=self.name, timeout_s=self.scan_timeout_s)
         needle = _normalize_ble_match_text(self.name)
         for device in devices:
             if needle and needle in _normalize_ble_match_text(device.name):

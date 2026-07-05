@@ -101,3 +101,47 @@ def test_assembler_yields_multiple_frames_in_one_chunk():
     blob = bytes.fromhex(REAL_FRAMES[0]) + bytes.fromhex(REAL_FRAMES[2])
     frames = asm.feed(blob)
     assert len(frames) == 2
+
+
+# -- joystick control (live-confirmed against real RS 4 Pro hardware) ----
+from motocam.gimbal.dji_duml import (  # noqa: E402
+    JOYSTICK_CENTER,
+    JOYSTICK_MAX,
+    JOYSTICK_MIN,
+    build_joystick_frame,
+    joystick_channel_value,
+)
+
+
+def test_joystick_channel_value_center_and_clamping():
+    assert joystick_channel_value(0.0) == JOYSTICK_CENTER
+    assert joystick_channel_value(1.0) == JOYSTICK_MAX
+    assert joystick_channel_value(-1.0) == JOYSTICK_MIN
+    # out-of-range ratios clamp, don't overflow
+    assert joystick_channel_value(5.0) == JOYSTICK_MAX
+    assert joystick_channel_value(-5.0) == JOYSTICK_MIN
+
+
+def test_build_joystick_frame_matches_captured_payload_shape():
+    # Shape verified against real captured payloads, e.g. chA=386 (near
+    # min), chB=1024, chC=1024 -> "820100040004000002" (see
+    # docs/RS4_BLE_FINDINGS.md): header fields, tail bytes, and the
+    # untouched channel sitting at JOYSTICK_CENTER all match.
+    built = build_joystick_frame(seq=0, ch_a=-1.0, ch_c=0.0, ch_b=0.0)
+    frame = DjiDumlFrame.parse(built)
+    assert frame.sender == 0x00 and frame.receiver == 0x04
+    assert frame.cmd_type == 0x00
+    assert frame.cmd_set == CMD_SET_GIMBAL and frame.cmd_id == 0x01
+    assert frame.payload[6:] == b"\x00\x00\x02"
+    a, b, c = __import__("struct").unpack_from("<HHH", frame.payload, 0)
+    assert a == JOYSTICK_MIN
+    assert b == JOYSTICK_CENTER and c == JOYSTICK_CENTER
+
+
+def test_build_joystick_frame_max_deflection_both_axes():
+    built = build_joystick_frame(seq=1, ch_a=1.0, ch_c=1.0)
+    frame = DjiDumlFrame.parse(built)
+    a, b, c = __import__("struct").unpack_from("<HHH", frame.payload, 0)
+    assert a == JOYSTICK_MAX and c == JOYSTICK_MAX
+    assert b == JOYSTICK_CENTER
+    assert frame.payload[6:] == b"\x00\x00\x02"

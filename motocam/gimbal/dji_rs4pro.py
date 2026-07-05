@@ -229,6 +229,13 @@ class BleTransport:
         self.tx_char_uuid = self._normalize_uuid(tx_char_uuid)
         self.rx_char_uuid = self._normalize_uuid(rx_char_uuid)
         self.scan_timeout_s = scan_timeout_s
+        # Floor, not the final word: open() raises this to the ACTUALLY
+        # negotiated ATT MTU once connected (commonly 247 on modern
+        # BLE, vs. this conservative un-negotiated default of 20). Without
+        # that, every joystick frame (22 bytes) was needlessly split into 2
+        # GATT writes -- doubling write traffic at the ~20 Hz control-tick
+        # rate, which is exactly the kind of load that produces the jerky,
+        # multi-second-lagging motion seen live on real hardware.
         self.mtu_payload_bytes = max(1, min(244, int(mtu_payload_bytes)))
         self._client: Any | None = None
         self._queue: asyncio.Queue[bytes] | None = None
@@ -247,6 +254,7 @@ class BleTransport:
         target = self.address or await self._scan_for_device()
         self._client = BleakClient(target)
         await self._client.connect(timeout=self.scan_timeout_s)
+        self._adopt_negotiated_mtu()
 
         services = await self._get_services()
         self._endpoint = self._select_characteristics(
@@ -258,11 +266,26 @@ class BleTransport:
         self._queue = asyncio.Queue()
         await self._client.start_notify(self._endpoint.rx_uuid, self._on_notify)
         logger.info(
-            "DJI RS 4 Pro BLE connected, write=%s notify=%s response=%s",
+            "DJI RS 4 Pro BLE connected, write=%s notify=%s response=%s mtu_payload=%d",
             self._endpoint.tx_uuid,
             self._endpoint.rx_uuid,
             self._endpoint.write_with_response,
+            self.mtu_payload_bytes,
         )
+
+    def _adopt_negotiated_mtu(self) -> None:
+        """Raise mtu_payload_bytes to the connection's actual negotiated ATT
+        MTU (bleak exposes this post-connect as client.mtu_size) if it's
+        bigger than our conservative floor -- never lowers it, so an
+        explicit smaller config value or a peripheral without MTU exchange
+        support both still work."""
+        mtu_size = getattr(self._client, "mtu_size", None)
+        if not isinstance(mtu_size, int) or mtu_size <= 3:
+            return
+        usable = min(244, mtu_size - 3)  # 3 bytes of ATT write-command overhead
+        if usable > self.mtu_payload_bytes:
+            logger.info("BLE MTU negotiated at %d -> raising write chunk size to %d bytes", mtu_size, usable)
+            self.mtu_payload_bytes = usable
 
     async def close(self) -> None:
         client = self._client

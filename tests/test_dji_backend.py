@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 
+from motocam.gimbal.dji_duml import JOYSTICK_CENTER, DjiDumlFrame
 from motocam.gimbal.dji_rs4pro import BleDeviceInfo, BleTransport, DjiRs4ProBackend, _sort_ble_device_infos
 from motocam.gimbal.rsdk_protocol import (
     CMD_GET_POSITION,
@@ -222,14 +223,33 @@ def test_ble_duml_connects_from_telemetry_without_sending():
     assert transport.sent == []  # DUML proof-of-life needs no outgoing frame
 
 
-def test_ble_duml_control_is_a_noop_not_wrong_frames():
+def test_ble_duml_set_velocity_sends_a_joystick_frame():
+    # Velocity control IS decoded (live-confirmed against real hardware,
+    # see docs/RS4_BLE_FINDINGS.md): must send a real DUML joystick frame,
+    # not stay a no-op.
+    transport = DumlTelemetryTransport()
+    backend = DjiRs4ProBackend(transport, max_pan_speed=20.0, max_tilt_speed=12.0)
+    asyncio.run(backend.connect())
+    asyncio.run(backend.set_velocity(10.0, -6.0))  # half deflection each axis
+    assert len(transport.sent) == 1
+    frame = DjiDumlFrame.parse(transport.sent[0])
+    assert frame.cmd_set == 0x04 and frame.cmd_id == 0x01
+    a, b, c = struct.unpack_from("<HHH", frame.payload, 0)
+    # pan_deg_s=10 (half of max 20) -> chC (pan) ratio +0.5, above center.
+    # tilt_deg_s=-6 (half of max 12, negative) -> chA (tilt) ratio -0.5,
+    # below center. Third channel (chB) stays neutral (untouched axis).
+    assert a < JOYSTICK_CENTER
+    assert b == JOYSTICK_CENTER
+    assert c > JOYSTICK_CENTER
+
+
+def test_ble_duml_go_home_stays_a_noop_not_wrong_frames():
+    # Recenter is NOT decoded over BLE yet -> must not send anything the
+    # gimbal would misinterpret.
     transport = DumlTelemetryTransport()
     backend = DjiRs4ProBackend(transport)
     asyncio.run(backend.connect())
-    asyncio.run(backend.set_velocity(15.0, 8.0))
     asyncio.run(backend.go_home())
-    # control isn't decoded over BLE -> we must NOT send 0xAA frames the
-    # gimbal would ignore; stays a no-op until reverse-engineered.
     assert transport.sent == []
 
 

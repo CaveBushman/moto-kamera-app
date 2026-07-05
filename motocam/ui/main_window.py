@@ -10,7 +10,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from motocam.ai.ai_engine import AiEngine
@@ -378,6 +378,14 @@ class MainWindow(QMainWindow):
         self.tracker.start()
 
         self._control_timer = QTimer(self)
+        # Qt's default CoarseTimer can legitimately drift by up to ~5% (or
+        # be coalesced further by the platform's event/compositor timing),
+        # which matters far more at a 50ms real-time control interval than
+        # it does for the other (non-latency-critical) timers below. This
+        # is one concrete, low-risk candidate for the jerky-on-Pi gimbal
+        # control report: an irregular tick here shows up directly as
+        # irregular call_gap_ms in DjiRs4ProBackend's joystick timing log.
+        self._control_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._control_timer.timeout.connect(self._control_tick)
         self._control_timer.start(50)  # 20 Hz
 

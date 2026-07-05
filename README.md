@@ -46,25 +46,26 @@ bidirectional link to the control room.
   development without the camera. Field names should be spot-checked
   against the firmware's own OpenAPI files on first contact with real
   hardware; the IP is retargetable live from Settings -> Camera & Lens.
-- `motocam/gimbal/dji_rs4pro.py` -- REAL (pending one hardware smoke
-  test): DJI R SDK control over BLE (`gimbal.connection: ble`) or via
-  the gimbal's RSA port over CAN (`connection: can`, e.g. an MCP2515 HAT
+- `motocam/gimbal/dji_rs4pro.py` -- REAL R SDK backend for the gimbal's
+  RSA port over CAN (`connection: can`, e.g. an MCP2515 HAT
   / USB-CAN adapter on the Pi at 1 Mbps, IDs 0x223/0x222) or UART
-  (`connection: uart`).
+  (`connection: uart`). BLE discovery is implemented too
+  (`connection: ble`), but the first RS 4 Pro hardware test found the
+  device as `DJI RS4 PRO-...` and showed DJI vendor BLE frames (`0x55`),
+  not raw R SDK frames (`0xAA`), so BLE is a diagnostics/experimentation
+  path until that vendor protocol is decoded.
   Frame codec + commands (velocity control for the PID loop, absolute
   position for HOME, position readout) live in `gimbal/rsdk_protocol.py`;
   all protocol constants are verified against the open-source
   ConstantRobotics/DJIR_SDK implementation of DJI's official R SDK
   protocol v2.2 (run by its authors against real RS-series hardware).
   The backend only reports connected after the gimbal answers a
-  GET_POSITION with a CRC-valid frame, so any RS 4 Pro difference shows
-  as DISCONNECTED, never as fake control. DJI's R SDK PDF v2.5 does not
-  publish BLE GATT UUIDs, so BLE supports Settings -> GIMBAL CONTROL ->
-  SCAN BLE DEVICES, best-effort write/notify auto-discovery, plus
-  explicit service/write/notify UUID fields in Settings/config for the
-  first real-hardware pairing. The shipped config defaults to BLE for
-  Raspberry Pi field use; `connection: mock` keeps the simulated gimbal
-  for development. `python-can` is required only on the
+  GET_POSITION with a CRC-valid frame, so a BLE/RSA mismatch shows as
+  DISCONNECTED, never as fake control. `scripts/rs4_ble_probe.py` repeats
+  the safe BLE scan/GATT/GET_POSITION diagnostic on field hardware;
+  `scripts/rs4_rsa_probe.py` does the same proof-of-life over the RSA
+  UART/CAN path we should use for deployment. `connection: mock` keeps
+  the simulated gimbal for development. `python-can` is required only on the
   Pi (`pip3 install python-can`); `bleak` is used for BLE and is already
   in `requirements.txt`.
 
@@ -186,6 +187,40 @@ By default it tries to reach the control room at `ws://127.0.0.1:8765`
 control room app first (or the moto app will just keep retrying every 3s
 in the background -- it degrades gracefully with NET shown as DOWN).
 
+## Hardware Probes
+
+Run these before opening the full app on the bike. They prove individual
+hardware links without moving the rig.
+
+```bash
+# DJI RS 4 Pro BLE discovery/profile check. Expected today: BLE is alive,
+# but no raw R SDK reply, so this is diagnostic only.
+PYTHONPATH=. python scripts/rs4_ble_probe.py
+
+# DJI RS 4 Pro BLE vendor capture for protocol research. Move the gimbal
+# by hand / press hardware buttons during the capture, then analyze the
+# resulting JSONL.
+PYTHONPATH=. python scripts/rs4_ble_capture.py --duration 20
+PYTHONPATH=. python scripts/rs4_ble_capture.py --duration 10 --send-rsdk-probe
+PYTHONPATH=. python scripts/rs4_ble_analyze.py captures/rs4_ble_*.jsonl
+
+# DJI RS 4 Pro RSA UART. This is the preferred first deployment path if
+# the RSA cable is wired to the Pi UART.
+PYTHONPATH=. python scripts/rs4_rsa_probe.py --transport uart --device /dev/ttyAMA0
+
+# DJI RS 4 Pro RSA CAN. Use after the SocketCAN interface is up.
+PYTHONPATH=. python scripts/rs4_rsa_probe.py --transport can --channel can0
+
+# List visible serial/CAN candidates on the machine.
+PYTHONPATH=. python scripts/rs4_rsa_probe.py --list
+
+# PYXIS REST API.
+PYTHONPATH=. python scripts/pyxis_probe.py 192.168.9.20
+
+# Hailo AI HAT+.
+PYTHONPATH=. python scripts/hailo_check.py
+```
+
 ## Layout
 
 ```
@@ -214,12 +249,14 @@ motocam/
   (mach struct mismatch) -- handled gracefully (`watchdog/health.py` catches
   it and reports the field as unavailable), just don't expect real numbers
   on an affected dev machine.
-- `DjiRs4ProBackend` is implemented for BLE/CAN/UART, but still needs a
-  real RS 4 Pro smoke test. BLE may require filling the service/write/
-  notify UUIDs in Settings if auto-discovery picks the wrong GATT pair.
-  (`PyxisCameraBackend` is now a real REST client; its remaining caveat
-  is spot-checking field names against the firmware's OpenAPI files on
-  first contact with actual hardware.)
+- `DjiRs4ProBackend` is implemented for CAN/UART and has BLE discovery
+  diagnostics. The first RS 4 Pro BLE smoke test found the gimbal and
+  its `fff0/fff3/fff4/fff5` GATT profile, but GET_POSITION produced only
+  DJI vendor BLE notifications, not raw R SDK replies. For deployment,
+  use the RS RSA port over UART/CAN unless DJI's BLE vendor protocol is
+  decoded. (`PyxisCameraBackend` is now a real REST client; its remaining
+  caveat is spot-checking field names against the firmware's OpenAPI
+  files on first contact with actual hardware.)
 - **macOS beta native crash**: on some macOS 26/27 betas, PyQt6/Qt6 can
   segfault inside its own Cocoa backing-store code
   (`QPaintDevice::devicePixelRatio()` null deref during a window flush --

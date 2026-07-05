@@ -8,6 +8,7 @@ venv/
 
 # Runtime
 logs/
+captures/
 *.log
 
 # Hailo models: large compiled binaries, downloaded per-machine by

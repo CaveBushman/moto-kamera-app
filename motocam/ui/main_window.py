@@ -614,7 +614,17 @@ class MainWindow(QMainWindow):
             error = self.tracker.error_from_center(self._last_frame.shape)
             if error is None:
                 return
-            pan_v, tilt_v = self.pid.update(*error)
+            error_x, error_y = error
+            # error_y is positive when the target is BELOW center (image y
+            # grows downward), but the app-wide convention -- established by
+            # the manual joystick's own `tilt_v = -dy_norm * ...` -- is that
+            # positive tilt_v means physically tilting UP. Feeding error_y
+            # straight in without this same negation was inverted: a
+            # below-center target produced a positive (tilt-up) correction,
+            # which moves the target even further below center (tilting up
+            # shifts the scene down in frame) -- a self-reinforcing loop that
+            # spins the gimbal even with a stationary subject.
+            pan_v, tilt_v = self.pid.update(error_x, -error_y)
             self._request_gimbal_velocity(False, pan_v, tilt_v)
         elif self.gimbal.mode == OperatingMode.MANUAL and self.preview.joystick.is_dragging:
             # re-send every tick (not just on touch-move) so holding the

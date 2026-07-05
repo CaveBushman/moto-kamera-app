@@ -42,6 +42,15 @@ def test_missing_rssi_does_not_crash_ranking():
     assert ranked[0].address == "BB"
 
 
+def test_rs4_without_space_matches_rs_4_filter():
+    devices = [
+        BleDeviceInfo("Random Speaker", "AA", rssi=-40),
+        BleDeviceInfo("DJI RS4 PRO-094PP0", "BB", rssi=-80),
+    ]
+    ranked = _sort_ble_device_infos(devices, name_filter="RS 4 Pro")
+    assert ranked[0].address == "BB"
+
+
 def test_label_includes_signal_when_present():
     assert "-55 dBm" in BleDeviceInfo("RS 4 Pro", "BB", rssi=-55).label
     assert "dBm" not in BleDeviceInfo("RS 4 Pro", "BB", rssi=None).label

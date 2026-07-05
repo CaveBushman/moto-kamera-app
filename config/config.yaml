@@ -5,21 +5,18 @@ video:
   height: 1080
   fps: 30
 ai:
-  type: hailo             # "hailo" = real AI HAT+ inference; anything else = NullDetector (tap-to-select only)
-  model: /opt/motorcam/models/cyclist_yolo.hef   # compiled .hef for the Hailo-8 (26 TOPS)
+  type: hailo
+  model: /opt/motorcam/models/cyclist_yolo.hef
   confidence: 0.35
-  max_fps: 12            # Hailo inference cap; CSRT tracking still runs on every video frame
-  infer_timeout_ms: 500  # skip one AI frame instead of blocking when Hailo stalls
+  max_fps: 30.0
+  infer_timeout_ms: 500
   target_class: cyclist
-  # labels: class order of the compiled model. Omit for a stock COCO
-  # YOLOv8/v11 HEF (person/bicycle/car/motorcycle/...). A custom
-  # cyclist-trained model lists its own classes here, e.g. [cyclist].
   labels: null
 gimbal:
   type: dji_rs4_pro
   connection: ble
-  ble_name: RS 4 Pro
-  ble_address: null
+  ble_name: DJI RS4 PRO-094PP0
+  ble_address: 5B36F71C-E8C8-CA4B-5578-0774EB33DE88
   ble_service_uuid: null
   ble_tx_char_uuid: null
   ble_rx_char_uuid: null
@@ -33,32 +30,28 @@ camera:
   type: blackmagic_pyxis
   ip: 192.168.9.20
   port: 9993
-  rest_port: 80         # Camera Control REST API port (HTTP 80 by default)
-  use_tls: false        # true if the camera serves the REST API over HTTPS
-                        # (recent firmware presents a device cert on :443 --
-                        # then set rest_port: 443 and use_tls: true)
-  verify_tls: false     # self-signed Blackmagic device cert -> leave false
-  username: null        # set username+password (or auth_token) only if the
-  password: null        # camera has REST API authentication enabled
+  rest_port: 80
+  use_tls: false
+  verify_tls: false
+  username: null
+  password: null
   auth_token: null
 gps:
-  device: auto          # auto-detects NMEA USB GPS; use null for simulated GPS or an explicit /dev/ttyACM0 path
+  device: auto
   baudrate: 9600
 telemetry:
   control_room_url: ws://127.0.0.1:8765
 preview_relay:
-  fps: 5              # low-rate JPEG preview to control room; PYXIS SRT is the real program feed
+  fps: 5
   jpeg_quality: 55
-  max_width: 960      # downscale dashboard preview so weak uplinks keep bandwidth for SRT
+  max_width: 960
 audio:
   input_device: null
   output_device: null
 display:
-  ui_scale: 1.5        # multiplies the WHOLE UI (fonts/buttons/chips). 1.0 = desktop;
-                       # bump to 1.5-2.0 on the Pi touchscreen for glove-friendly sizes
-  controls_scale: 1.4  # extra enlargement of just the PTT/zoom/joystick thumb controls
-                       # on top of ui_scale (glove operation on a moving bike). 1.0 = off
-  fullscreen: true     # true on the kiosk touchscreen; false for a windowed dev desktop
+  ui_scale: 1.5
+  controls_scale: 1.4
+  fullscreen: true
 safety:
   ride_lock_enabled: false
   ride_lock_speed_kmh: 15

@@ -204,3 +204,41 @@ def test_locked_rider_dropped_after_max_age_needs_manual():
         eng.update_detections([])
     assert eng._locked_id is None
     assert eng.state == TargetState.MANUAL_REQUIRED
+
+
+# -- tilt sign contract (regression: gimbal spun in place on real hardware) --
+# The app-wide convention -- established by the manual joystick's own
+# `tilt_v = -dy_norm * max_tilt_speed` in main_window.py -- is that
+# positive tilt_v means physically tilting UP (confirmed live: a positive
+# joystick channel value tilts the real RS 4 Pro up). _control_tick must
+# apply that same negation to error_from_center()'s error_y (which is
+# positive when the target is BELOW center, since image y grows downward)
+# before handing it to GimbalPid. Skipping that negation was live-confirmed
+# to make the gimbal spin continuously even with a stationary subject: a
+# below-center target produced a positive (tilt-up) correction, and tilting
+# up shifts the scene DOWN in frame -- pushing the target further below
+# center and reinforcing itself every tick.
+from motocam.tracking.pid import GimbalPid  # noqa: E402
+
+
+def _control_tick_tilt_v(target_cy: float, frame_h: int = 480) -> float:
+    """Reproduces main_window._control_tick's pan/tilt feed (the fixed
+    version, with the negation) without needing a full MainWindow."""
+    eng = TrackingEngine()
+    eng.select_at(FRAME, 320, int(target_cy))
+    error_x, error_y = eng.error_from_center((frame_h, 640))
+    pid = GimbalPid()
+    _pan_v, tilt_v = pid.update(error_x, -error_y)
+    return tilt_v
+
+
+def test_target_below_center_produces_negative_tilt_v_not_positive():
+    # target well below center -> must command tilt DOWN (negative),
+    # not tilt UP (positive), or the loop runs away.
+    tilt_v = _control_tick_tilt_v(target_cy=400, frame_h=480)  # 320,400 is below center (240)
+    assert tilt_v < 0
+
+
+def test_target_above_center_produces_positive_tilt_v():
+    tilt_v = _control_tick_tilt_v(target_cy=80, frame_h=480)  # above center (240)
+    assert tilt_v > 0

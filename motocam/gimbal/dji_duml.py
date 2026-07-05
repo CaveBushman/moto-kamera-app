@@ -119,6 +119,46 @@ class DjiDumlFrame:
         )
 
 
+class DjiDumlAssembler:
+    """Reassemble DUML frames from arbitrary BLE notification chunks and
+    yield the CRC-valid ones (a corrupt/false-SOF byte is skipped and the
+    stream re-synced on the next 0x55)."""
+
+    def __init__(self, max_buffer: int = 4096):
+        self._buffer = bytearray()
+        self._max_buffer = max_buffer
+
+    def feed(self, chunk: bytes) -> list[DjiDumlFrame]:
+        self._buffer.extend(chunk)
+        frames: list[DjiDumlFrame] = []
+        while True:
+            start = self._buffer.find(bytes([DUML_SOF]))
+            if start < 0:
+                self._buffer.clear()
+                break
+            if start:
+                del self._buffer[:start]
+            if len(self._buffer) < 3:
+                break
+            length = self._buffer[1] | ((self._buffer[2] & 0x03) << 8)
+            if length < OVERHEAD or length > 0x3FF:
+                del self._buffer[0]  # implausible length -> false SOF
+                continue
+            if len(self._buffer) < length:
+                break
+            raw = bytes(self._buffer[:length])
+            try:
+                frame = DjiDumlFrame.parse(raw)
+            except ValueError:
+                del self._buffer[0]  # bad CRC -> false SOF, resync
+                continue
+            frames.append(frame)
+            del self._buffer[:length]
+        if len(self._buffer) > self._max_buffer:
+            del self._buffer[: -self._max_buffer]
+        return frames
+
+
 def build_duml_frame(
     sender: int,
     receiver: int,

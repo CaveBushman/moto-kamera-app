@@ -181,3 +181,57 @@ def test_ble_scan_results_prioritize_name_match_then_signal():
     )
 
     assert [device.address for device in devices] == ["cc", "bb", "aa"]
+
+
+# -- BLE DUML transport: connect on telemetry, control is an honest no-op --
+class DumlTelemetryTransport:
+    """RS 4 Pro BLE: DUML, and pushes telemetry without being asked. Records
+    any writes so we can prove control is NOT sent over BLE yet."""
+
+    protocol = "duml"
+    async_transport = True
+
+    def __init__(self):
+        # a real captured gimbal DUML frame (cmd_set 0x04, cmd_id 0x27)
+        self._pending = bytes.fromhex("551204c70402719500042700800000002014")
+        self.sent: list[bytes] = []
+
+    async def open(self):
+        pass
+
+    async def close(self):
+        pass
+
+    async def send(self, frame: bytes):
+        self.sent.append(frame)
+
+    async def receive_chunk(self, timeout_s: float) -> bytes:
+        chunk, self._pending = self._pending[:8], self._pending[8:]
+        return chunk
+
+
+def test_ble_duml_connects_from_telemetry_without_sending():
+    transport = DumlTelemetryTransport()
+    backend = DjiRs4ProBackend(transport)
+    asyncio.run(backend.connect())
+    assert backend.connected is True
+    assert transport.sent == []  # DUML proof-of-life needs no outgoing frame
+
+
+def test_ble_duml_control_is_a_noop_not_wrong_frames():
+    transport = DumlTelemetryTransport()
+    backend = DjiRs4ProBackend(transport)
+    asyncio.run(backend.connect())
+    asyncio.run(backend.set_velocity(15.0, 8.0))
+    asyncio.run(backend.go_home())
+    # control isn't decoded over BLE -> we must NOT send 0xAA frames the
+    # gimbal would ignore; stays a no-op until reverse-engineered.
+    assert transport.sent == []
+
+
+def test_ble_duml_no_telemetry_stays_disconnected():
+    transport = DumlTelemetryTransport()
+    transport._pending = b""  # gimbal silent
+    backend = DjiRs4ProBackend(transport)
+    asyncio.run(backend.connect())
+    assert backend.connected is False

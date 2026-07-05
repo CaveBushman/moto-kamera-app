@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from motocam.gimbal.base import GimbalBackend
+from motocam.gimbal.dji_duml import DjiDumlAssembler
 from motocam.gimbal.rsdk_protocol import (
     FrameAssembler,
     build_get_position,
@@ -179,15 +180,19 @@ async def scan_ble_devices(name_filter: str = "", timeout_s: float = 5.0) -> lis
 
 
 def _sort_ble_device_infos(devices: list[BleDeviceInfo], name_filter: str = "") -> list[BleDeviceInfo]:
-    needle = name_filter.strip().lower()
+    needle = _normalize_ble_match_text(name_filter)
 
     def key(device: BleDeviceInfo):
-        name = device.name.lower()
+        name = _normalize_ble_match_text(device.name)
         name_miss = bool(needle and needle not in name)
         rssi_rank = device.rssi if device.rssi is not None else -999
-        return name_miss, -rssi_rank, name, device.address
+        return name_miss, -rssi_rank, device.name.lower(), device.address
 
     return sorted(devices, key=key)
+
+
+def _normalize_ble_match_text(value: str) -> str:
+    return "".join(ch for ch in value.lower() if ch.isalnum())
 
 
 class BleTransport:
@@ -201,6 +206,9 @@ class BleTransport:
     """
 
     async_transport = True
+    # The RS 4 Pro's BLE GATT stream is DJI DUML (0x55), not the R SDK 0xAA
+    # framing used on the RSA UART/CAN port (see docs/RS4_BLE_FINDINGS.md).
+    protocol = "duml"
 
     def __init__(
         self,
@@ -292,9 +300,9 @@ class BleTransport:
 
     async def _scan_for_device(self):
         devices = await scan_ble_devices(name_filter=self.name, timeout_s=self.scan_timeout_s)
-        needle = self.name.lower()
+        needle = _normalize_ble_match_text(self.name)
         for device in devices:
-            if needle and needle in device.name.lower():
+            if needle and needle in _normalize_ble_match_text(device.name):
                 return device.address
         seen = ", ".join(device.name for device in devices) or "none"
         raise RuntimeError(f"BLE gimbal '{self.name}' not found; scanned devices: {seen}")
@@ -431,6 +439,13 @@ class DjiRs4ProBackend(GimbalBackend):
         self._last_connect_attempt = 0.0
         self._last_orientation = (0.0, 0.0, 0.0)
         self._connect_lock = asyncio.Lock()
+        # BLE speaks DUML (0x55); CAN/UART speak the R SDK (0xAA). The DUML
+        # command payloads aren't decoded yet (need a write-side capture),
+        # so on BLE we prove the link from the gimbal's own DUML telemetry
+        # push and honestly no-op control until it's reverse-engineered.
+        self._protocol = getattr(transport, "protocol", "rsdk")
+        self._duml_assembler = DjiDumlAssembler()
+        self._ble_control_warned = False
 
     def _next_sequence(self) -> int:
         self._sequence = (self._sequence + 1) & 0xFFFF
@@ -459,20 +474,40 @@ class DjiRs4ProBackend(GimbalBackend):
                 logger.info("R SDK transport not available (%s), will retry", exc)
                 self._connected = False
                 return
-            # Proof-of-life: the gimbal must answer a position query with a
-            # CRC-valid reply before we claim a connection.
+            # Proof-of-life differs by transport protocol: the RSA port
+            # (CAN/UART) answers an R SDK GET_POSITION; BLE (DUML) pushes
+            # telemetry on its own, so a single CRC-valid DUML frame proves
+            # the link without us sending anything.
+            label = getattr(self.transport, "label", self.transport.__class__.__name__)
+            if self._protocol == "duml":
+                alive = await self._duml_proof_of_life()
+                if not alive:
+                    logger.warning(
+                        "BLE open but no DUML frame received -- check the notify "
+                        "characteristic (fff4) and that the gimbal is powered/awake"
+                    )
+                    await self._call_transport("close")
+                    self._connected = False
+                    return
+                self._connected = True
+                logger.info(
+                    "DJI RS 4 Pro connected via %s (DUML telemetry OK). NOTE: BLE control "
+                    "commands are not decoded yet -- movement is disabled on this transport.",
+                    label,
+                )
+                return
+
             orientation = await self._query_position()
             if orientation is None:
                 logger.warning(
                     "R SDK transport open but gimbal did not answer GET_POSITION -- "
-                    "check BLE UUIDs or RSA wiring/CAN bitrate/termination"
+                    "check RSA wiring/CAN bitrate/termination"
                 )
                 await self._call_transport("close")
                 self._connected = False
                 return
             self._last_orientation = orientation
             self._connected = True
-            label = getattr(self.transport, "label", self.transport.__class__.__name__)
             logger.info("DJI RS 4 Pro connected via %s R SDK transport (position reply OK)", label)
 
     async def disconnect(self) -> None:
@@ -480,6 +515,18 @@ class DjiRs4ProBackend(GimbalBackend):
             await self._call_transport("close")
         finally:
             self._connected = False
+
+    async def _duml_proof_of_life(self) -> bool:
+        """Wait for one CRC-valid DUML frame from the gimbal (it streams
+        telemetry on notify without being asked). No send needed."""
+        deadline = time.monotonic() + REPLY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            chunk = await self._call_transport("receive_chunk", max(0.0, deadline - time.monotonic()))
+            if not chunk:
+                continue
+            if self._duml_assembler.feed(chunk):
+                return True
+        return False
 
     async def _query_position(self) -> tuple[float, float, float] | None:
         request = build_get_position(self._next_sequence())
@@ -503,6 +550,9 @@ class DjiRs4ProBackend(GimbalBackend):
     async def set_velocity(self, pan_deg_s: float, tilt_deg_s: float) -> None:
         if not self._connected:
             return
+        if self._protocol == "duml":
+            self._warn_ble_control_once()
+            return
         frame = build_speed_control(self._next_sequence(), pan_deg_s, tilt_deg_s)
         try:
             await self._call_transport("send", frame)
@@ -513,6 +563,9 @@ class DjiRs4ProBackend(GimbalBackend):
     async def go_home(self) -> None:
         if not self._connected:
             return
+        if self._protocol == "duml":
+            self._warn_ble_control_once()
+            return
         frame = build_position_control(self._next_sequence(), 0.0, 0.0)
         try:
             await self._call_transport("send", frame)
@@ -521,11 +574,23 @@ class DjiRs4ProBackend(GimbalBackend):
             self._connected = False
 
     async def get_orientation(self) -> tuple[float, float, float]:
-        if self._connected:
+        # DUML (BLE): the angle payload isn't decoded yet (needs a moving
+        # capture), so don't send an R SDK query the gimbal ignores and
+        # don't fake a reading -- orientation stays at the last value.
+        if self._connected and self._protocol != "duml":
             orientation = await self._query_position()
             if orientation is not None:
                 self._last_orientation = orientation
         return self._last_orientation
+
+    def _warn_ble_control_once(self) -> None:
+        if not self._ble_control_warned:
+            logger.warning(
+                "Gimbal control over BLE is not available yet: the RS 4 Pro's DUML "
+                "command frames are not reverse-engineered (need a write-side capture). "
+                "Use the RSA port (CAN/UART) for control, or see docs/RS4_BLE_FINDINGS.md."
+            )
+            self._ble_control_warned = True
 
     async def _call_transport(self, method_name: str, *args):
         method = getattr(self.transport, method_name)

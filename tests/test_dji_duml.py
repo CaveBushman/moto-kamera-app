@@ -73,3 +73,31 @@ def test_parse_rejects_bad_sof():
     raw[0] = 0xAA
     with pytest.raises(ValueError):
         DjiDumlFrame.parse(bytes(raw))
+
+
+# -- DUML reassembly from BLE chunks --------------------------------------
+from motocam.gimbal.dji_duml import DjiDumlAssembler  # noqa: E402
+
+
+def test_assembler_reassembles_a_split_frame():
+    asm = DjiDumlAssembler()
+    raw = bytes.fromhex(REAL_FRAMES[0])
+    out = []
+    for i in range(0, len(raw), 5):  # dribble it in 5-byte BLE-ish chunks
+        out += asm.feed(raw[i : i + 5])
+    assert len(out) == 1
+    assert out[0].cmd_set == CMD_SET_GIMBAL and out[0].cmd_id == 0x27
+
+
+def test_assembler_skips_garbage_before_a_frame():
+    asm = DjiDumlAssembler()
+    frames = asm.feed(b"\x00\x11\x22" + bytes.fromhex(REAL_FRAMES[1]))
+    assert len(frames) == 1
+    assert frames[0].cmd_set == CMD_SET_GIMBAL
+
+
+def test_assembler_yields_multiple_frames_in_one_chunk():
+    asm = DjiDumlAssembler()
+    blob = bytes.fromhex(REAL_FRAMES[0]) + bytes.fromhex(REAL_FRAMES[2])
+    frames = asm.feed(blob)
+    assert len(frames) == 2

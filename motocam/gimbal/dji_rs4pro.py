@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from motocam.gimbal.base import GimbalBackend
-from motocam.gimbal.dji_duml import DjiDumlAssembler, build_joystick_frame
+from motocam.gimbal.dji_duml import DjiDumlAssembler, build_joystick_frame, build_recenter_frame
 from motocam.gimbal.rsdk_protocol import (
     FrameAssembler,
     build_get_position,
@@ -486,13 +486,13 @@ class DjiRs4ProBackend(GimbalBackend):
         self._connect_lock = asyncio.Lock()
         # BLE speaks DUML (0x55); CAN/UART speak the R SDK (0xAA). set_velocity
         # over DUML sends the reverse-engineered joystick command (cmd_set
-        # 0x04, cmd_id 0x01 -- see dji_duml.build_joystick_frame, decoded from
-        # a PacketLogger capture of the Ronin app and confirmed live against
-        # real hardware: chA=tilt +up/-down, chC=pan +right/-left). Recenter
-        # (go_home) is NOT decoded yet -- that stays an honest no-op.
+        # 0x04, cmd_id 0x01 -- see dji_duml.build_joystick_frame) and
+        # go_home() sends the recenter command (cmd_set 0x04, cmd_id 0x4c --
+        # see dji_duml.build_recenter_frame). Both decoded from PacketLogger
+        # captures of the Ronin app and confirmed live against real
+        # hardware: chA=tilt +up/-down, chC=pan +right/-left.
         self._protocol = getattr(transport, "protocol", "rsdk")
         self._duml_assembler = DjiDumlAssembler()
-        self._ble_control_warned = False
         # Optional: dump received DUML telemetry to a JSONL for offline
         # decode (set MOTOCAM_DUML_CAPTURE=/path). Lets you capture a moving
         # gimbal through the app itself -- no separate BLE connection that
@@ -545,7 +545,7 @@ class DjiRs4ProBackend(GimbalBackend):
                 self._connected = True
                 logger.info(
                     "DJI RS 4 Pro connected via %s (DUML telemetry OK). Joystick velocity "
-                    "control is live; recenter (HOME/RESET) is not decoded yet on this transport.",
+                    "and recenter (HOME/RESET) control are both live.",
                     label,
                 )
                 return
@@ -624,7 +624,12 @@ class DjiRs4ProBackend(GimbalBackend):
         if not self._connected:
             return
         if self._protocol == "duml":
-            self._warn_ble_control_once()
+            frame = build_recenter_frame(self._next_sequence())
+            try:
+                await self._call_transport("send", frame)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("BLE recenter send failed (%s), marking disconnected", exc)
+                self._connected = False
             return
         frame = build_position_control(self._next_sequence(), 0.0, 0.0)
         try:
@@ -669,16 +674,6 @@ class DjiRs4ProBackend(GimbalBackend):
                 }) + "\n")
         except OSError as exc:
             logger.debug("DUML capture write failed: %s", exc)
-
-    def _warn_ble_control_once(self) -> None:
-        if not self._ble_control_warned:
-            logger.warning(
-                "Recenter (HOME/RESET) over BLE is not available yet: only the joystick "
-                "velocity command (cmd_set 0x04, cmd_id 0x01) has been reverse-engineered "
-                "so far, not a recenter/position command. Use RESET via the RSA port "
-                "(CAN/UART), or see docs/RS4_BLE_FINDINGS.md."
-            )
-            self._ble_control_warned = True
 
     async def _call_transport(self, method_name: str, *args):
         method = getattr(self.transport, method_name)

@@ -145,3 +145,25 @@ def test_build_joystick_frame_max_deflection_both_axes():
     assert a == JOYSTICK_MAX and c == JOYSTICK_MAX
     assert b == JOYSTICK_CENTER
     assert frame.payload[6:] == b"\x00\x00\x02"
+
+
+# -- recenter/HOME (live-confirmed against real RS 4 Pro hardware) -------
+from motocam.gimbal.dji_duml import build_recenter_frame  # noqa: E402
+
+# Real captured frame for the recenter button press (see docs/RS4_BLE_FINDINGS.md)
+RECENTER_CAPTURED_FRAME = "550f04a20204da0540044cfe019567"
+
+
+def test_build_recenter_frame_matches_captured_frame_exactly():
+    captured = bytes.fromhex(RECENTER_CAPTURED_FRAME)
+    frame = DjiDumlFrame.parse(captured)
+    built = build_recenter_frame(seq=frame.seq)
+    assert built == captured
+
+
+def test_recenter_frame_header_fields():
+    frame = DjiDumlFrame.parse(build_recenter_frame(seq=42))
+    assert frame.sender == 0x02 and frame.receiver == 0x04
+    assert frame.cmd_type == 0x40
+    assert frame.cmd_set == CMD_SET_GIMBAL and frame.cmd_id == 0x4C
+    assert frame.payload == bytes.fromhex("fe01")

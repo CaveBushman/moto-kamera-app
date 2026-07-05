@@ -238,3 +238,33 @@ def build_joystick_frame(seq: int, ch_a: float, ch_c: float, ch_b: float = 0.0) 
         cmd_type=0x00, cmd_set=CMD_SET_GIMBAL, cmd_id=CMD_ID_JOYSTICK,
         payload=payload,
     )
+
+
+# -- BLE recenter/HOME (cmd_set 0x04, cmd_id 0x4c) ------------------------
+# Reverse-engineered from a third PacketLogger capture of the Ronin app's
+# recenter control (see docs/RS4_BLE_FINDINGS.md). An earlier capture
+# session had suggested cmd_set 0x00/cmd_id 0x34 as the recenter command,
+# but that live-tested as a no-op against real hardware (gimbal did not
+# move) and does not reappear in this capture at all -- it was evidently
+# an unrelated command that happened to fire near that button press, not
+# the actual action. This one is a much better fit: it lives under
+# cmd_set 0x04 (GIMBAL, the same command set as the joystick control),
+# fires exactly once (a true one-shot action, not a stream), and the
+# surrounding traffic is just the same ambient chatter seen throughout
+# every capture -- no other unusual command appears near it.
+RECENTER_SENDER = 0x02
+RECENTER_RECEIVER = 0x04
+CMD_ID_RECENTER = 0x4C
+RECENTER_PAYLOAD = bytes.fromhex("fe01")
+
+
+def build_recenter_frame(seq: int) -> bytes:
+    """RS 4 Pro BLE recenter/HOME command. Reproduces the captured frame's
+    header and payload exactly (see docs/RS4_BLE_FINDINGS.md); only the
+    sequence number and CRCs vary per call. Not yet confirmed live against
+    real hardware -- see the log warning in DjiRs4ProBackend.go_home()."""
+    return build_duml_frame(
+        sender=RECENTER_SENDER, receiver=RECENTER_RECEIVER, seq=seq,
+        cmd_type=0x40, cmd_set=CMD_SET_GIMBAL, cmd_id=CMD_ID_RECENTER,
+        payload=RECENTER_PAYLOAD,
+    )

@@ -243,14 +243,18 @@ def test_ble_duml_set_velocity_sends_a_joystick_frame():
     assert c > JOYSTICK_CENTER
 
 
-def test_ble_duml_go_home_stays_a_noop_not_wrong_frames():
-    # Recenter is NOT decoded over BLE yet -> must not send anything the
-    # gimbal would misinterpret.
+def test_ble_duml_go_home_sends_the_recenter_frame():
+    # Recenter IS decoded (live-confirmed against real hardware -- gimbal
+    # visibly returned to center, see docs/RS4_BLE_FINDINGS.md).
     transport = DumlTelemetryTransport()
     backend = DjiRs4ProBackend(transport)
     asyncio.run(backend.connect())
     asyncio.run(backend.go_home())
-    assert transport.sent == []
+    assert len(transport.sent) == 1
+    frame = DjiDumlFrame.parse(transport.sent[0])
+    assert frame.cmd_set == 0x04 and frame.cmd_id == 0x4C
+    assert frame.sender == 0x02 and frame.receiver == 0x04
+    assert frame.payload == bytes.fromhex("fe01")
 
 
 def test_ble_duml_no_telemetry_stays_disconnected():

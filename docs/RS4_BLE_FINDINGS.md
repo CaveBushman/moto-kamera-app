@@ -43,33 +43,99 @@ we build carry checksums the gimbal accepts.
 
 sender→receiver pairs: `04→02`, `e5→02`, `e4→02`, `27→02`.
 
-## What we can and cannot do yet
+## Control commands: SOLVED and live-confirmed
 
-**Solved — the transport.** We can frame, checksum, parse and build DUML.
-This replaces the (incorrect for BLE) 0xAA path in the BLE backend.
+A PacketLogger capture of the DJI Ronin app's own BLE writes (iOS
+Bluetooth logging profile + PacketLogger.app, parsed with
+`scripts/pklg_parse.py` — see that script's docstring for the `.pklg`
+record format) revealed both control commands actually used by the app.
+The write characteristic is confirmed **`fff5`** (write-without-response),
+paired with the `fff4` notify, matching `BleTransport`'s existing GATT
+auto-discovery.
 
-**Not solved — telemetry mapping.** In this capture the gimbal was
-essentially stationary: within each `(cmd_set, cmd_id)` the payload bytes
-are constant; only the sequence number and CRC change. So we cannot yet
-map payload offsets to yaw / roll / pitch.
-→ **Need a capture while deliberately moving the gimbal** (pan full
-left→right, tilt up→down, roll) so the angle bytes sweep and can be
-correlated. Then `get_orientation()` for the BLE backend can be written.
+### Joystick velocity (cmd_set 0x04, cmd_id 0x01)
 
-**Not solved — control commands.** The capture is only `fff4`
-*notifications* (gimbal → app). It contains no app→gimbal writes, so the
-set-speed / set-position command ids and payloads are unknown.
-→ **Need a write-side capture** (the DJI Ronin app's BLE writes — e.g. an
-Android HCI snoop log, or a BLE sniffer) to learn the control cmd_set/id
-and payload layout. The write characteristic is most likely `fff5`
-(paired with the `fff4` notify), to be confirmed.
+Sent continuously (~15–20 Hz) while any axis is off-center, sender
+`0x00` → receiver `0x04`, cmd_type `0x00`. 9-byte payload: three uint16
+LE channels, each centered at `1024` (rest/zero):
 
-## Next steps
+```
+[chA uint16 LE] [chB uint16 LE] [chC uint16 LE] [00 00] [02]
+```
 
-1. Capture with the gimbal moving through known extents → decode attitude
-   → implement DUML `get_orientation()`.
-2. Capture the Ronin app's writes → decode the speed/position command →
-   implement DUML control, replacing the 0xAA R SDK frames on the BLE
-   transport in `dji_rs4pro.py`.
-3. Keep CAN/UART on the existing R SDK (0xAA) path — that transport is
-   unchanged; only BLE is DUML.
+The capture showed each moved channel sweeping smoothly across roughly
+`364..1683`/`364..1680` (held at each extreme) — symmetric `1024 ± ~660`,
+which is the *empirically proven-safe* deflection used by
+`build_joystick_frame()` (not the theoretical 0..2047 11-bit full range,
+which was never observed). The third channel stayed at `1024` (untouched)
+throughout the capture.
+
+**Live-confirmed against real hardware** (RS 4 Pro, moto-1 unit):
+- `chA` = **tilt** (positive = up, negative = down)
+- `chC` = **pan** (negative = left, positive = right)
+- `chB` = unconfirmed (likely roll), never exercised in any capture
+
+Implemented as `DjiRs4ProBackend.set_velocity()` for the DUML/BLE
+protocol, normalizing `pan_deg_s`/`tilt_deg_s` by the backend's
+`max_pan_speed`/`max_tilt_speed` into the `±660` channel range.
+
+### Recenter / HOME (cmd_set 0x04, cmd_id 0x4c)
+
+A one-shot command (unlike the continuous joystick stream), sender
+`0x02` → receiver `0x04`, cmd_type `0x40`, 2-byte payload `fe 01`.
+
+An earlier capture had suggested `cmd_set 0x00 / cmd_id 0x34` (payload
+`01 01 00 00 00 00`) as the recenter command — it looked plausible (fired
+once, right as the button was pressed) but **live-tested as a no-op**:
+sent to the real gimbal twice, including once with the gimbal
+deliberately misaligned first, with zero motion. It doesn't reappear in
+later captures at all, so it was evidently an unrelated command that
+happened to fire near that button press.
+
+`cmd_set 0x04 / cmd_id 0x4c` is the real one: it lives under the same
+command set as the joystick (0x04 = gimbal, vs. 0x00 = general/system),
+fires exactly once per press, and the surrounding traffic in the capture
+is just the same ambient chatter (`0x06/0x48`, `0x00/0x0e`, `0x04/0x12`,
+`0x07/0x30`, `0x00/0x00`, `0x00/0x01`) seen in every capture regardless
+of what button was pressed. **Live-confirmed**: sent to the real gimbal
+with it deliberately off-center — it visibly recentered.
+
+Implemented as `DjiRs4ProBackend.go_home()` for the DUML/BLE protocol via
+`build_recenter_frame()`.
+
+### Ambient/background traffic (not yet decoded, not needed so far)
+
+Every capture — regardless of what the operator did — also shows
+`cmd_set 0x06/id 0x48`, `cmd_set 0x00/id 0x0e`, `cmd_set 0x00/id 0x00`,
+`cmd_set 0x00/id 0x01`, `cmd_set 0x07/id 0x30`, `cmd_set 0x0d/id 0x01`,
+and `cmd_set 0x04/id 0x12` (the last with an always-constant ~27-byte
+payload) at roughly 1–10 Hz. These look like periodic status/heartbeat
+polling unrelated to any specific action — joystick and recenter both
+worked when sent standalone (no need to replicate this ambient traffic),
+so it's left alone for now.
+
+## Still open
+
+**Telemetry mapping (orientation).** In the read-only capture (gimbal
+essentially stationary or moved without isolating one axis at a time),
+payload bytes were either constant or too aliased (the attitude push,
+`cmd_set 0x04/id 0x05`, is only ~1 Hz) to reliably assign offsets to
+yaw/roll/pitch. `get_orientation()` over BLE remains un-implemented
+(returns the last known value, never queried/faked). Would need a
+capture holding each axis at known angles (0°, ±90°) for several seconds
+each to get clean, unaliased samples.
+
+## Method note: getting a write-side capture (worked)
+
+1. Install "Additional Tools for Xcode" (has `PacketLogger.app`) and the
+   iOS Bluetooth logging profile from developer.apple.com.
+2. Connect the iPhone via USB, `PacketLogger.app` → File → New iOS Trace.
+3. Operate the DJI Ronin app (joystick / recenter button) while it
+   records.
+4. Save as `.pklg`, parse with `scripts/pklg_parse.py <file.pklg>` — it
+   extracts every ATT-Send DUML frame, grouped by `(cmd_set, cmd_id)`,
+   with full untruncated payloads and a timeline.
+5. **The phone and any of our own BLE test scripts cannot hold the BLE
+   link at the same time** — only one central can connect to the gimbal.
+   Disconnect one before using the other, or captures come back empty or
+   drop after ~1s.

@@ -178,28 +178,62 @@ class FakeClientWithMtu(FakeClient):
 def test_adopt_negotiated_mtu_raises_chunk_size():
     transport = BleTransport(address="x", mtu_payload_bytes=20)
     transport._client = FakeClientWithMtu(mtu_size=247)
-    transport._adopt_negotiated_mtu()
+    asyncio.run(transport._adopt_negotiated_mtu())
     assert transport.mtu_payload_bytes == 244  # 247 - 3 ATT overhead, capped at 244
 
 
 def test_adopt_negotiated_mtu_never_lowers_configured_value():
     transport = BleTransport(address="x", mtu_payload_bytes=100)
     transport._client = FakeClientWithMtu(mtu_size=23)  # un-negotiated default (20 usable)
-    transport._adopt_negotiated_mtu()
+    asyncio.run(transport._adopt_negotiated_mtu())
     assert transport.mtu_payload_bytes == 100  # smaller negotiated MTU must not shrink it
 
 
 def test_adopt_negotiated_mtu_handles_missing_attribute():
     transport = BleTransport(address="x", mtu_payload_bytes=20)
     transport._client = FakeClient()  # no mtu_size attribute at all
-    transport._adopt_negotiated_mtu()  # must not raise
+    asyncio.run(transport._adopt_negotiated_mtu())  # must not raise
     assert transport.mtu_payload_bytes == 20
 
 
 def test_a_22_byte_joystick_frame_fits_one_write_after_mtu_negotiation():
     transport = BleTransport(address="x", mtu_payload_bytes=20)
     transport._client = FakeClientWithMtu(mtu_size=247)
-    transport._adopt_negotiated_mtu()
+    asyncio.run(transport._adopt_negotiated_mtu())
     transport._endpoint = BleEndpoint(tx_uuid=FFF5, rx_uuid=FFF4, write_with_response=False)
     asyncio.run(transport.send(bytes(22)))
     assert len(transport._client.writes) == 1  # previously split into 2 at the old fixed 20-byte chunk size
+
+
+class FakeClientWithDelayedMtu(FakeClient):
+    """Simulates BlueZ (Linux): mtu_size reads as the un-negotiated default
+    for the first few checks, then becomes the real negotiated value --
+    the exact behavior that made the original single-immediate-read
+    version silently miss the negotiated MTU on the Pi (smooth on macOS,
+    jerky/stepped on the Pi, from every joystick frame needlessly split
+    into 2 GATT writes)."""
+
+    def __init__(self, final_mtu: int, ready_after_checks: int):
+        super().__init__()
+        self.final_mtu = final_mtu
+        self.ready_after_checks = ready_after_checks
+        self._checks = 0
+
+    @property
+    def mtu_size(self):
+        self._checks += 1
+        return self.final_mtu if self._checks >= self.ready_after_checks else 23
+
+
+def test_adopt_negotiated_mtu_polls_for_a_delayed_bluez_style_negotiation():
+    transport = BleTransport(address="x", mtu_payload_bytes=20)
+    transport._client = FakeClientWithDelayedMtu(final_mtu=247, ready_after_checks=3)
+    asyncio.run(transport._adopt_negotiated_mtu())
+    assert transport.mtu_payload_bytes == 244
+
+
+def test_adopt_negotiated_mtu_gives_up_after_polling_and_keeps_the_floor():
+    transport = BleTransport(address="x", mtu_payload_bytes=20)
+    transport._client = FakeClientWithDelayedMtu(final_mtu=247, ready_after_checks=999)
+    asyncio.run(transport._adopt_negotiated_mtu())
+    assert transport.mtu_payload_bytes == 20  # never became ready within the poll window

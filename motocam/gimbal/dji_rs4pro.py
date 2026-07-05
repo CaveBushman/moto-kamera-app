@@ -311,7 +311,7 @@ class BleTransport:
                 return client
 
         self._client = await _retry_bluez_in_progress(_connect)
-        self._adopt_negotiated_mtu()
+        await self._adopt_negotiated_mtu()
 
         services = await self._get_services()
         self._endpoint = self._select_characteristics(
@@ -330,19 +330,41 @@ class BleTransport:
             self.mtu_payload_bytes,
         )
 
-    def _adopt_negotiated_mtu(self) -> None:
+    async def _adopt_negotiated_mtu(self) -> None:
         """Raise mtu_payload_bytes to the connection's actual negotiated ATT
         MTU (bleak exposes this post-connect as client.mtu_size) if it's
         bigger than our conservative floor -- never lowers it, so an
         explicit smaller config value or a peripheral without MTU exchange
-        support both still work."""
-        mtu_size = getattr(self._client, "mtu_size", None)
-        if not isinstance(mtu_size, int) or mtu_size <= 3:
-            return
-        usable = min(244, mtu_size - 3)  # 3 bytes of ATT write-command overhead
-        if usable > self.mtu_payload_bytes:
-            logger.info("BLE MTU negotiated at %d -> raising write chunk size to %d bytes", mtu_size, usable)
-            self.mtu_payload_bytes = usable
+        support both still work.
+
+        On bleak's CoreBluetooth (macOS) backend mtu_size is populated by
+        the time connect() returns. On the BlueZ (Linux/Pi) backend the MTU
+        exchange can complete a little *after* connect() returns (it's a
+        separate D-Bus property update), so a single immediate read can
+        still see the un-negotiated default (23) and silently keep every
+        joystick frame split into 2 GATT writes -- exactly the jerky,
+        stepped motion seen live on the Pi but not on macOS. Poll briefly
+        instead of reading once."""
+        for attempt in range(6):  # ~0.6s total, generous for a D-Bus round trip
+            mtu_size = getattr(self._client, "mtu_size", None)
+            # 23 is BLE's un-negotiated default ATT MTU (protocol-defined,
+            # not a guess) -- keep polling while we're still seeing it, only
+            # adopt once it's genuinely negotiated above that.
+            if isinstance(mtu_size, int) and mtu_size > 23:
+                usable = min(244, mtu_size - 3)  # 3 bytes of ATT write-command overhead
+                if usable > self.mtu_payload_bytes:
+                    logger.info(
+                        "BLE MTU negotiated at %d (after %d check%s) -> raising write chunk size to %d bytes",
+                        mtu_size, attempt + 1, "" if attempt == 0 else "s", usable,
+                    )
+                    self.mtu_payload_bytes = usable
+                return
+            await asyncio.sleep(0.1)
+        logger.info(
+            "BLE MTU not reported as negotiated after connect (mtu_size=%r) -- "
+            "keeping write chunk size at %d bytes",
+            getattr(self._client, "mtu_size", None), self.mtu_payload_bytes,
+        )
 
     async def close(self) -> None:
         client = self._client

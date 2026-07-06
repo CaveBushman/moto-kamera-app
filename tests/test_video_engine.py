@@ -11,6 +11,7 @@ import time
 import pytest
 
 from motocam.video.video_engine import VideoEngine
+from motocam.video import video_engine as video_engine_module
 
 
 def _pump(qapp, predicate, timeout_s: float) -> None:
@@ -51,6 +52,20 @@ def test_stop_joins_capture_thread(qapp):
     _pump(qapp, lambda: False, timeout_s=0.2)  # let the loop spin up
     ve.stop()
     assert ve._thread is None or not ve._thread.is_alive()
+
+
+def test_fps_signal_is_throttled(monkeypatch):
+    ve = VideoEngine(device="/dev/motocam-nonexistent", width=160, height=120, fps=60)
+    emitted: list[float] = []
+    ve.fps_updated.connect(lambda fps: emitted.append(fps))
+
+    times = iter([0.00, 0.10, 0.20, 0.30, 0.61])
+    monkeypatch.setattr(video_engine_module.time, "monotonic", lambda: next(times))
+
+    for _ in range(5):
+        ve._record_fps()
+
+    assert len(emitted) == 2
 
 
 @pytest.fixture(scope="module")

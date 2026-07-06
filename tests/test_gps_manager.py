@@ -9,7 +9,8 @@ import time
 
 import serial
 
-from motocam.gps.gps_manager import GpsManager
+from motocam.gps import gps_manager as gps_module
+from motocam.gps.gps_manager import DetectedGpsDevice, GpsManager
 
 # Valid fixtures pynmea2 parses: a GGA (fix + position) and an RMC (speed).
 GGA = b"$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n"
@@ -115,3 +116,87 @@ def test_close_joins_reader_thread():
     gps._start_reader()
     gps.close()
     assert gps._reader_thread is None
+
+
+def test_candidate_baudrates_prefers_configured_value_then_common_values():
+    gps = GpsManager(device="auto", baudrate=38400)
+    assert gps._candidate_baudrates() == [38400, 9600, 115200]
+
+
+def test_candidate_baudrates_auto_uses_common_nmea_values():
+    gps = GpsManager(device="auto", baudrate="auto")
+    assert gps._candidate_baudrates() == [9600, 38400, 115200]
+
+
+def test_auto_device_detection_returns_device_and_matching_baudrate(monkeypatch):
+    gps = GpsManager(device="auto", baudrate=9600)
+    calls: list[tuple[str, int]] = []
+
+    monkeypatch.setattr(gps, "_candidate_devices", lambda: ["/dev/not-gps", "/dev/gps"])
+
+    def looks_like_nmea(device: str, baudrate: int) -> bool:
+        calls.append((device, baudrate))
+        return device == "/dev/gps" and baudrate == 115200
+
+    monkeypatch.setattr(gps, "_looks_like_nmea", looks_like_nmea)
+
+    detected = gps._detect_device()
+
+    assert detected == DetectedGpsDevice(device="/dev/gps", baudrate=115200)
+    assert calls == [
+        ("/dev/not-gps", 9600),
+        ("/dev/not-gps", 38400),
+        ("/dev/not-gps", 115200),
+        ("/dev/gps", 9600),
+        ("/dev/gps", 38400),
+        ("/dev/gps", 115200),
+    ]
+
+
+def test_open_auto_device_uses_detected_baudrate(monkeypatch):
+    opened: dict[str, object] = {}
+
+    class _OpeningSerial:
+        def __init__(self, device: str, baudrate: int, timeout: float):
+            opened["device"] = device
+            opened["baudrate"] = baudrate
+            opened["timeout"] = timeout
+
+        def close(self) -> None:
+            pass
+
+    gps = GpsManager(device="auto", baudrate=9600)
+    monkeypatch.setattr(gps, "_detect_device", lambda: DetectedGpsDevice("/dev/gps", 115200))
+    monkeypatch.setattr(gps, "_start_reader", lambda: None)
+    monkeypatch.setattr(gps_module.serial, "Serial", _OpeningSerial)
+
+    gps.open()
+
+    assert gps.device == "/dev/gps"
+    assert gps.baudrate == 115200
+    assert opened == {"device": "/dev/gps", "baudrate": 115200, "timeout": 0.2}
+    assert gps.source == "real"
+
+
+def test_explicit_device_supports_auto_baudrate(monkeypatch):
+    opened: dict[str, object] = {}
+
+    class _OpeningSerial:
+        def __init__(self, device: str, baudrate: int, timeout: float):
+            opened["device"] = device
+            opened["baudrate"] = baudrate
+            opened["timeout"] = timeout
+
+        def close(self) -> None:
+            pass
+
+    gps = GpsManager(device="/dev/gps", baudrate="auto")
+    monkeypatch.setattr(gps, "_detect_baudrate", lambda device: 38400)
+    monkeypatch.setattr(gps, "_start_reader", lambda: None)
+    monkeypatch.setattr(gps_module.serial, "Serial", _OpeningSerial)
+
+    gps.open()
+
+    assert gps.baudrate == 38400
+    assert opened == {"device": "/dev/gps", "baudrate": 38400, "timeout": 0.2}
+    assert gps.source == "real"

@@ -126,6 +126,7 @@ def test_no_write_or_notify_characteristic_raises():
 class FakeClient:
     def __init__(self):
         self.writes: list[tuple[str, bytes, bool]] = []
+        self.services = []
 
     async def write_gatt_char(self, uuid, data, response):
         self.writes.append((uuid, bytes(data), response))
@@ -144,6 +145,65 @@ def test_send_splits_frame_into_mtu_sized_writes():
     assert sizes == [8, 8, 4]
     assert b"".join(data for _u, data, _r in client.writes) == frame
     assert all(uuid == FFF5 and resp is False for uuid, _d, resp in client.writes)
+
+
+class FakeClientWithFailingServices(FakeClient):
+    @property
+    def services(self):
+        raise AssertionError("hot-path send must not read GATT services")
+
+    @services.setter
+    def services(self, value):
+        pass
+
+
+def test_send_hot_path_does_not_recheck_services():
+    transport = BleTransport(address="x", mtu_payload_bytes=20)
+    client = FakeClientWithFailingServices()
+    transport._client = client
+    transport._endpoint = BleEndpoint(tx_uuid=FFF5, rx_uuid=FFF4, write_with_response=False)
+
+    asyncio.run(transport.send(b"\x01\x02"))
+
+    assert client.writes == [(FFF5, b"\x01\x02", False)]
+
+
+class FakeClientWithServiceRace(FakeClient):
+    def __init__(self, ready_after: int):
+        super().__init__()
+        self.ready_after = ready_after
+        self._service_reads = 0
+        self._write_attempts = 0
+
+    @property
+    def services(self):
+        self._service_reads += 1
+        if self._service_reads < self.ready_after:
+            raise RuntimeError("Service Discovery has not been performed yet")
+        return []
+
+    @services.setter
+    def services(self, value):
+        pass
+
+    async def write_gatt_char(self, uuid, data, response):
+        self._write_attempts += 1
+        if self._write_attempts == 1:
+            raise RuntimeError("Service Discovery has not been performed yet")
+        await super().write_gatt_char(uuid, data, response)
+
+
+def test_send_recovers_from_service_discovery_race_once():
+    transport = BleTransport(address="x", mtu_payload_bytes=20)
+    client = FakeClientWithServiceRace(ready_after=3)
+    transport._client = client
+    transport._endpoint = BleEndpoint(tx_uuid=FFF5, rx_uuid=FFF4, write_with_response=False)
+
+    asyncio.run(transport.send(b"\x01\x02"))
+
+    assert client.writes == [(FFF5, b"\x01\x02", False)]
+    assert client._write_attempts == 2
+    assert client._service_reads >= 3
 
 
 def test_send_without_open_raises():

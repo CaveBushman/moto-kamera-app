@@ -6,17 +6,12 @@ video:
   fps: 30
 ai:
   type: hailo
-  model: models/yolov8n.hef   # stock COCO model (scripts/setup_hailo.sh fetches
-                              # this) -- no "cyclist" class yet, so target_class
-                              # is "bicycle" for now. Swap to a custom
-                              # cyclist-trained .hef + target_class: cyclist
-                              # once one is trained (see docs/HAILO_SETUP.md).
+  model: models/yolov8n.hef
   confidence: 0.35
-  max_fps: 30.0
+  max_fps: 15.0
   infer_timeout_ms: 500
-  target_class: bicycle      # COCO has no "cyclist" class; bicycle is the
-                              # closest stock detection for FULL-AI auto-acquire
-  labels: null                # null = default COCO class order
+  target_class: bicycle
+  labels: null
 gimbal:
   type: dji_rs4_pro
   connection: ble
@@ -25,6 +20,7 @@ gimbal:
   ble_service_uuid: null
   ble_tx_char_uuid: null
   ble_rx_char_uuid: null
+  ble_velocity_timeout_s: 0.15
   can_channel: can0
   can_bitrate: 1000000
   uart_device: /dev/ttyAMA0
@@ -32,9 +28,8 @@ gimbal:
   max_pan_speed: 20
   max_tilt_speed: 12
 camera:
-  type: blackmagic_rest   # generic Blackmagic Camera Control REST API --
-                          # PYXIS, Studio Cameras, Micro Studio Camera 4K G2, ...
-  ip: 192.168.9.20        # TODO: update to the Micro Studio Camera 4K G2's real IP
+  type: blackmagic_rest
+  ip: 192.168.9.20
   port: 9993
   rest_port: 80
   use_tls: false
@@ -57,6 +52,8 @@ audio:
 display:
   ui_scale: 1.5
   controls_scale: 1.4
+  preview_fps: 20
+  preview_smooth_scaling: false
   fullscreen: true
 safety:
   ride_lock_enabled: false

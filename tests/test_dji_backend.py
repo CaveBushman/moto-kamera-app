@@ -6,7 +6,13 @@ from __future__ import annotations
 import asyncio
 
 from motocam.gimbal.dji_duml import JOYSTICK_CENTER, DjiDumlFrame
-from motocam.gimbal.dji_rs4pro import BleDeviceInfo, BleTransport, DjiRs4ProBackend, _sort_ble_device_infos
+from motocam.gimbal.dji_rs4pro import (
+    VELOCITY_SEND_TIMEOUT_S,
+    BleDeviceInfo,
+    BleTransport,
+    DjiRs4ProBackend,
+    _sort_ble_device_infos,
+)
 from motocam.gimbal.rsdk_protocol import (
     CMD_GET_POSITION,
     CMD_SET_GIMBAL,
@@ -241,6 +247,60 @@ def test_ble_duml_set_velocity_sends_a_joystick_frame():
     assert a < JOYSTICK_CENTER
     assert b == JOYSTICK_CENTER
     assert c > JOYSTICK_CENTER
+
+
+class SlowDumlWriteTransport(DumlTelemetryTransport):
+    async def send(self, frame: bytes):
+        await asyncio.sleep(VELOCITY_SEND_TIMEOUT_S + 0.05)
+        self.sent.append(frame)
+
+
+def test_ble_duml_slow_velocity_write_is_dropped_without_disconnect():
+    transport = SlowDumlWriteTransport()
+    backend = DjiRs4ProBackend(transport, max_pan_speed=20.0, max_tilt_speed=12.0)
+    asyncio.run(backend.connect())
+    asyncio.run(backend.set_velocity(10.0, -6.0))
+
+    assert backend.connected is True
+    assert transport.sent == []
+
+
+def test_ble_duml_velocity_timeout_is_configurable():
+    transport = SlowDumlWriteTransport()
+    backend = DjiRs4ProBackend(
+        transport,
+        max_pan_speed=20.0,
+        max_tilt_speed=12.0,
+        velocity_send_timeout_s=0.05,
+    )
+
+    assert backend.velocity_send_timeout_s == 0.05
+
+
+def test_ble_duml_velocity_stats_report_write_gap_and_timeouts():
+    transport = DumlTelemetryTransport()
+    backend = DjiRs4ProBackend(transport, max_pan_speed=20.0, max_tilt_speed=12.0)
+    asyncio.run(backend.connect())
+    asyncio.run(backend.set_velocity(10.0, -6.0))
+    asyncio.run(backend.set_velocity(0.0, 0.0))
+
+    stats = backend.velocity_stats()
+
+    assert stats["velocity_write_ms_avg"] is not None
+    assert stats["velocity_write_ms_max"] is not None
+    assert stats["velocity_call_gap_ms_avg"] is not None
+    assert stats["velocity_call_gap_ms_max"] is not None
+    assert stats["velocity_timeouts"] == 0
+
+
+def test_ble_duml_health_check_marks_disconnected_transport_down():
+    transport = DumlTelemetryTransport()
+    transport.is_connected = lambda: False
+    backend = DjiRs4ProBackend(transport)
+    asyncio.run(backend.connect())
+
+    assert asyncio.run(backend.check_connection()) is False
+    assert backend.connected is False
 
 
 def test_ble_duml_go_home_sends_the_recenter_frame():

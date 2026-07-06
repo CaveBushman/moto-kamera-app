@@ -52,28 +52,27 @@ control room.
   should be spot-checked against the firmware's own OpenAPI files on
   first contact with real hardware; the IP is retargetable live from
   Settings -> Camera & Lens.
-- `motocam/gimbal/dji_rs4pro.py` -- REAL R SDK backend for the gimbal's
-  RSA port over CAN (`connection: can`, e.g. an MCP2515 HAT
-  / USB-CAN adapter on the Pi at 1 Mbps, IDs 0x223/0x222) or UART
-  (`connection: uart`). BLE discovery is implemented too
-  (`connection: ble`), but the first RS 4 Pro hardware test found the
-  device as `DJI RS4 PRO-...` and showed DJI vendor BLE frames (`0x55`),
-  not raw R SDK frames (`0xAA`), so BLE is a diagnostics/experimentation
-  path until that vendor protocol is decoded.
+- `motocam/gimbal/dji_rs4pro.py` -- REAL DJI RS 4 Pro backend. RSA
+  CAN (`connection: can`, e.g. an MCP2515 HAT / USB-CAN adapter on the
+  Pi at 1 Mbps, IDs 0x223/0x222) and RSA UART (`connection: uart`) use
+  DJI R SDK framing. BLE (`connection: ble`) uses DJI DUML framing from
+  the RS 4 Pro GATT profile (`fff5` write / `fff4` notify): joystick
+  velocity and recenter/HOME are live-confirmed against real hardware.
+  BLE orientation telemetry is still not decoded, so the angle readout
+  remains unavailable on BLE for now.
   Frame codec + commands (velocity control for the PID loop, absolute
   position for HOME, position readout) live in `gimbal/rsdk_protocol.py`;
   all protocol constants are verified against the open-source
   ConstantRobotics/DJIR_SDK implementation of DJI's official R SDK
   protocol v2.2 (run by its authors against real RS-series hardware).
-  The backend only reports connected after the gimbal answers a
-  GET_POSITION with a CRC-valid frame, so a BLE/RSA mismatch shows as
-  DISCONNECTED, never as fake control. `scripts/rs4_ble_probe.py` repeats
-  the safe BLE scan/GATT/GET_POSITION diagnostic on field hardware;
-  `scripts/rs4_rsa_probe.py` does the same proof-of-life over the RSA
-  UART/CAN path we should use for deployment. `connection: mock` keeps
-  the simulated gimbal for development. `python-can` is required only on the
-  Pi (`pip3 install python-can`); `bleak` is used for BLE and is already
-  in `requirements.txt`.
+  The backend only reports connected after a real proof-of-life: CRC-valid
+  R SDK position reply on RSA, or CRC-valid DUML telemetry on BLE. That
+  keeps a wrong transport visible as DISCONNECTED, never fake control.
+  `scripts/rs4_ble_probe.py` and the BLE capture/analyze scripts are still
+  useful for field diagnostics; `scripts/rs4_rsa_probe.py` does proof-of-life
+  over RSA UART/CAN. `connection: mock` keeps the simulated gimbal for
+  development. `python-can` is required only on the Pi (`pip3 install
+  python-can`); `bleak` is used for BLE and is already in `requirements.txt`.
 
 Beyond MVP1, also implemented:
 
@@ -90,9 +89,10 @@ Beyond MVP1, also implemented:
 - **AF control**: a compact autofocus button beside the smaller REC button
   in the camera panel; wired through the camera controller/mock backend.
 - **Settings dialog** (`ui/widgets/settings_dialog.py`): unit ID (MOTO 1-4)
-  and control-room IP/port with live reconnect, camera IP/port, gimbal
-  transport (mock/BLE/CAN/UART) with BLE UUID overrides, camera ISO/WB/
-  shutter/iris, PTT input/output audio devices, and AI tracking params
+  and control-room IP/port with live reconnect, GPS device/baudrate with
+  background reconnect, camera IP/port, gimbal transport (mock/BLE/CAN/UART)
+  with BLE UUID overrides, camera ISO/WB/shutter/iris, PTT input/output
+  audio devices, and AI tracking params
   (target class, confidence, dead zone, max pan/tilt speed) -- all editable
   at runtime, no restart needed.
   `LinkClient.reconfigure()` handles the live control-room reconnect.
@@ -141,14 +141,22 @@ Beyond MVP1, also implemented:
   like normal ready states.
 - **AI HAT+ performance control**: `config/config.yaml -> ai.max_fps`
   caps Hailo inference rate independently from the video/tracking loop
-  (default 12 fps). CSRT tracking still updates on every video frame, so
+  (current Pi profile: 15 fps). CSRT tracking still updates on every video frame, so
   the Pi can keep touch/UI/video responsive while the AI accelerator and
   preprocessing stay within a predictable budget. Telemetry reports AI
   inference FPS, cap, worker busy estimate, last inference time and
   dropped AI frames; Settings exposes AI max FPS live, no restart.
+- **Touchscreen render performance**: `config/config.yaml -> display.preview_fps`
+  caps only the on-screen Qt preview rendering (default 20 fps on the Pi).
+  Capture, AI, tracking, telemetry and preview relay stay independent.
+  `display.preview_smooth_scaling: false` uses faster live-video scaling
+  so the UI thread leaves more room for joystick/control ticks.
 - **GPS auto-detect**: `gps.device: auto` scans common USB serial paths
   and only accepts a port after seeing an NMEA sentence; otherwise it
-  falls back to simulated GPS with the source marked `SIMULATED`.
+  falls back to simulated GPS with the source marked `SIMULATED`. It
+  probes the configured `gps.baudrate` first, then common NMEA rates
+  `9600`, `38400`, and `115200`; set `gps.baudrate: auto` when using a
+  known `/dev/...` port but unknown receiver speed.
 - **Ride-safe lockout** (Settings -> Safety, off by default): above a
   configurable GPS speed, SETTINGS and the CAM/GIMBAL HUD gray out so a
   gloved thumb isn't tempted into fiddly ISO/shutter/lens taps while
@@ -255,14 +263,12 @@ motocam/
   (mach struct mismatch) -- handled gracefully (`watchdog/health.py` catches
   it and reports the field as unavailable), just don't expect real numbers
   on an affected dev machine.
-- `DjiRs4ProBackend` is implemented for CAN/UART and has BLE discovery
-  diagnostics. The first RS 4 Pro BLE smoke test found the gimbal and
-  its `fff0/fff3/fff4/fff5` GATT profile, but GET_POSITION produced only
-  DJI vendor BLE notifications, not raw R SDK replies. For deployment,
-  use the RS RSA port over UART/CAN unless DJI's BLE vendor protocol is
-  decoded. (`PyxisCameraBackend` is now a real REST client; its remaining
-  caveat is spot-checking field names against the firmware's OpenAPI
-  files on first contact with actual hardware.)
+- BLE gimbal control can pan/tilt and recenter the RS 4 Pro, but BLE
+  orientation telemetry is not decoded yet. If deterministic angle readout
+  becomes mandatory, use the RSA UART/CAN path or decode the DUML telemetry
+  orientation payloads from new captures. (`PyxisCameraBackend` is now a
+  real REST client; its remaining caveat is spot-checking field names
+  against the firmware's OpenAPI files on first contact with actual hardware.)
 - **macOS beta native crash**: on some macOS 26/27 betas, PyQt6/Qt6 can
   segfault inside its own Cocoa backing-store code
   (`QPaintDevice::devicePixelRatio()` null deref during a window flush --

@@ -225,15 +225,15 @@ class HailoDetector:
             logger.debug("Hailo configured-model exit failed: %s", exc)
 
 
-class DevHefDetector:
-    """Synthetic detector enabled only by a MotoCam dev HEF marker file.
+class SimulatedDetector:
+    """Deterministic software detector for staged AI rollout.
 
-    This is not a Hailo executable and is deliberately labelled `dev_hef`
-    in telemetry. It lets us exercise AI ASSIST / FULL AI / ByteTrack
-    without pretending that a real Hailo-8 model is present.
+    This never touches HailoRT or a HEF file. It lets us exercise AI
+    ASSIST / FULL AI / ByteTrack on the Ri5 with predictable load before
+    we reintroduce the real accelerator path.
     """
 
-    source = "dev_hef"
+    source = "sim_ai"
 
     def __init__(self, class_name: str = "bicycle"):
         self.class_name = class_name or "bicycle"
@@ -262,6 +262,17 @@ class DevHefDetector:
         return (len(self._frame_times) - 1) / span if span > 0 else 0.0
 
 
+class DevHefDetector(SimulatedDetector):
+    """Synthetic detector enabled only by a MotoCam dev HEF marker file.
+
+    This is not a Hailo executable and is deliberately labelled `dev_hef`
+    in telemetry. It remains for compatibility with the older dev HEF
+    workflow; new staged testing should use ai.type: simulated.
+    """
+
+    source = "dev_hef"
+
+
 def is_dev_hef(path: str | Path) -> bool:
     try:
         with Path(path).open("rb") as fh:
@@ -283,9 +294,14 @@ def resolve_hef_path(hef_path: str, config_dir: str | Path | None = None) -> str
 
 def build_detector(cfg: dict):
     """Build the configured detector, or NullDetector on any failure.
-    ai.type: "hailo" enables real inference; anything else = NullDetector."""
+    ai.type: "simulated" exercises AI without Hailo; "hailo" enables real inference."""
     ai_cfg = cfg.get("ai", {})
-    if str(ai_cfg.get("type", "")).lower() != "hailo":
+    ai_type = str(ai_cfg.get("type", "")).lower()
+    if ai_type in {"simulated", "simulation", "sim"}:
+        class_name = str(ai_cfg.get("target_class") or "bicycle")
+        logger.warning("Simulated AI detector active -- no Hailo runtime or HEF will be used")
+        return SimulatedDetector(class_name=class_name)
+    if ai_type != "hailo":
         return NullDetector("null_disabled")
     hef_path = ai_cfg.get("model") or ai_cfg.get("hef_path")
     if not hef_path:

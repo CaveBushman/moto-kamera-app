@@ -6,9 +6,10 @@ video:
   fps: 30
   allow_macos_capture: false
 ai:
-  type: hailo
+  type: simulated
   model: models/yolov8n.hef
   confidence: 0.35
+  startup_delay_s: 5.0
   max_fps: 3.0
   max_input_width: 416
   infer_timeout_ms: 80
@@ -71,3 +72,4 @@ safety:
   ride_lock_speed_kmh: 15
 logging:
   dir: logs
+_config_dir: /Users/david/Development/07 moto kamera app/config

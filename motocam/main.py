@@ -131,8 +131,23 @@ def create_splash() -> QSplashScreen:
     return splash
 
 
+async def _connect_hardware(name: str, connect_coro, timeout_s: float) -> None:
+    logger = logging.getLogger("motocam.main")
+    try:
+        logger.info("Starting %s connect", name)
+        await asyncio.wait_for(connect_coro(), timeout=timeout_s)
+        logger.info("%s connect finished", name)
+    except asyncio.TimeoutError:
+        logger.warning("%s connect timed out after %.1fs; UI stays live and refresh/retry will continue", name, timeout_s)
+    except Exception as exc:  # noqa: BLE001 -- startup must degrade, not freeze the app
+        logger.warning("%s connect failed during startup: %s", name, exc)
+
+
 async def async_connect_all(gimbal: GimbalController, camera: CameraController) -> None:
-    await asyncio.gather(gimbal.connect(), camera.connect())
+    await asyncio.gather(
+        _connect_hardware("gimbal", gimbal.connect, 8.0),
+        _connect_hardware("camera", camera.connect, 3.0),
+    )
 
 
 def main() -> int:
@@ -217,7 +232,11 @@ def main() -> int:
     else:
         window.show()
         logger.info("Main window shown windowed")
-    QTimer.singleShot(1200, lambda: splash.finish(window))
+
+    app.processEvents()
+    splash.finish(window)
+    logger.info("Splash screen finished")
+    QTimer.singleShot(0, window.start_runtime)
 
     logger.info("Opening GPS")
     gps.open()

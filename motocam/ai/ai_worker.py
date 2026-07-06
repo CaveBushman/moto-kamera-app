@@ -19,11 +19,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
-from motocam.ai.ai_engine import AiEngine
+from motocam.ai.ai_engine import AiEngine, Detector
 
 logger = logging.getLogger("motocam.ai.worker")
 UTIL_WINDOW_S = 2.0
@@ -81,10 +82,13 @@ class AiWorker(QThread):
         max_fps: float = 0.0,
         max_input_width: int = 960,
         performance_budget_pct: float = 35.0,
+        detector_factory: Callable[[], Detector] | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self._engine = ai_engine
+        self._detector_factory = detector_factory
+        self._detector_factory_done = detector_factory is None
         self._lock = threading.Lock()
         self._latest: np.ndarray | None = None
         self._wake = threading.Event()
@@ -137,6 +141,7 @@ class AiWorker(QThread):
             return frame
 
     def run(self) -> None:  # noqa: D401 -- QThread entry point
+        self._ensure_detector_ready()
         while self._running:
             self._wake.wait()
             if not self._running:
@@ -161,6 +166,23 @@ class AiWorker(QThread):
                 failed = True
             self._record_inference(time.monotonic() - start, failed)
             self.detections_ready.emit(detections)
+
+    def _ensure_detector_ready(self) -> None:
+        if self._detector_factory_done or self._detector_factory is None:
+            return
+        try:
+            start = time.monotonic()
+            detector = self._detector_factory()
+            self._engine.detector = detector
+            logger.info(
+                "AI detector initialised on worker thread in %.0f ms (source=%s)",
+                (time.monotonic() - start) * 1000.0,
+                self._engine.source,
+            )
+        except Exception as exc:  # noqa: BLE001 -- AI init must never prevent manual operation
+            logger.warning("AI detector initialisation failed on worker thread: %s", exc)
+        finally:
+            self._detector_factory_done = True
 
     def set_max_fps(self, max_fps: float) -> None:
         max_fps = max(0.0, float(max_fps or 0.0))

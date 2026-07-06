@@ -11,6 +11,7 @@ from motocam.ai.ai_engine import Detection, NullDetector
 from motocam.ai.hailo_detector import (
     DEV_HEF_MAGIC,
     DevHefDetector,
+    SimulatedDetector,
     build_detector,
     is_dev_hef,
     letterbox,
@@ -88,6 +89,16 @@ def test_build_detector_falls_back_to_null_without_hailo_type():
     detector = build_detector({"ai": {"type": "mock"}})
     assert isinstance(detector, NullDetector)
     assert detector.source == "null_disabled"
+
+
+def test_build_detector_uses_simulated_ai_without_hailo_runtime():
+    detector = build_detector({"ai": {"type": "simulated", "target_class": "bicycle"}})
+
+    assert isinstance(detector, SimulatedDetector)
+    assert detector.source == "sim_ai"
+    dets = detector.infer(np.zeros((240, 320, 3), dtype=np.uint8))
+    assert len(dets) == 1
+    assert dets[0].class_name == "bicycle"
 
 
 def test_build_detector_reports_missing_hailo_model():

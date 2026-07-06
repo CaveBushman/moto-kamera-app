@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import threading
 
-from motocam.ai.ai_engine import AiEngine, Detection
+from motocam.ai.ai_engine import AiEngine, Detection, NullDetector
 from motocam.ai import ai_worker as ai_worker_module
 from motocam.ai.ai_worker import AiWorker
 
@@ -104,6 +105,22 @@ def test_running_worker_emits_detections(qapp):
     assert stats["worker_util_pct"] is not None
 
 
+def test_detector_factory_runs_on_worker_thread(qapp):
+    main_thread = threading.get_ident()
+    factory_thread: dict[str, int] = {}
+    engine = AiEngine(detector=NullDetector("initializing"))
+    worker = AiWorker(engine, detector_factory=lambda: _factory_detector(factory_thread))
+
+    worker.start()
+    try:
+        _spin_until(qapp, lambda: factory_thread.get("id") is not None, timeout_s=2.0)
+    finally:
+        worker.stop()
+
+    assert factory_thread["id"] != main_thread
+    assert engine.source == "fake"
+
+
 def test_worker_downscales_inference_frame_and_remaps_detections(qapp):
     detector = _CountingDetector()
     engine = AiEngine(detector=detector)
@@ -164,6 +181,11 @@ def test_inference_exception_is_swallowed(qapp):
 
 
 # -- helpers --------------------------------------------------------------
+def _factory_detector(factory_thread: dict[str, int]) -> _CountingDetector:
+    factory_thread["id"] = threading.get_ident()
+    return _CountingDetector()
+
+
 def _spin_until(qapp, predicate, timeout_s: float) -> None:
     import time
 

@@ -12,7 +12,7 @@ import numpy as np
 from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
-from motocam.ai.ai_engine import AiEngine
+from motocam.ai.ai_engine import AiEngine, NullDetector
 from motocam.ai.ai_worker import AiWorker
 from motocam.ai.hailo_detector import build_detector
 from motocam.audio.ptt_engine import SAMPLE_RATE, PttEngine
@@ -125,10 +125,14 @@ class MainWindow(QMainWindow):
         self._ai_guard_busy_ms = float(ai_cfg.get("guard_busy_ms", 500.0))
         self._ai_guard_util_pct = float(ai_cfg.get("guard_util_pct", 75.0))
         self._ai_guard_cooldown_s = float(ai_cfg.get("guard_cooldown_s", 15.0))
+        self._ai_type = str(ai_cfg.get("type", "")).lower()
+        self._ai_runtime_enabled = self._ai_type in {"hailo", "simulated", "simulation", "sim"}
+        self._ai_startup_delay_s = max(0.0, float(ai_cfg.get("startup_delay_s", 0.0) or 0.0))
+        self._ai_worker_started = False
 
         self.tracker = TrackingEngine(max_input_width=int(tracking_cfg.get("max_input_width", 640) or 0))
         self.ai_engine = AiEngine(
-            detector=build_detector(self._config),
+            detector=NullDetector("initializing" if self._ai_runtime_enabled else "null_disabled"),
             target_class=ai_cfg.get("target_class", "cyclist"),
             confidence=float(ai_cfg.get("confidence", 0.35)),
         )
@@ -141,6 +145,7 @@ class MainWindow(QMainWindow):
             max_fps=float(ai_cfg.get("max_fps", 12.0)),
             max_input_width=int(ai_cfg.get("max_input_width", 960) or 0),
             performance_budget_pct=float(ai_cfg.get("performance_budget_pct", 35.0)),
+            detector_factory=(lambda: build_detector(self._config)) if self._ai_runtime_enabled else None,
         )
         self._latest_detections: list = []
         self.pid = GimbalPid(
@@ -174,6 +179,7 @@ class MainWindow(QMainWindow):
         self._gps_reconfiguring = False
         self._last_pipeline_log_at = 0.0
         self._last_slow_frame_log_at = 0.0
+        self._runtime_started = False
 
         self._build_ui()
         self._wire_signals()
@@ -181,7 +187,6 @@ class MainWindow(QMainWindow):
         self.preview.ptt_button.set_available(self.ptt_engine.available)
         self.preview.set_link_state(self.link.connected, self._preview_streaming)
         self._sync_joystick_active()
-        self._start_timers()
 
     # -- UI construction -------------------------------------------------
     def _build_ui(self) -> None:
@@ -449,10 +454,21 @@ class MainWindow(QMainWindow):
         self._manual_tilt_v = 0.0
         self._pending_zoom_speed = None
 
-    def _start_timers(self) -> None:
-        self.ai_worker.start()
+    def start_runtime(self) -> None:
+        if self._runtime_started:
+            return
+        self._runtime_started = True
+        logger.info("Starting UI runtime timers/workers")
         self._preview_encoder.start()
         self.tracker.start()
+        if self._ai_runtime_enabled:
+            if self._ai_startup_delay_s > 0:
+                logger.info("AI runtime will start after %.1fs stability delay", self._ai_startup_delay_s)
+                QTimer.singleShot(int(self._ai_startup_delay_s * 1000), self._start_ai_runtime)
+            else:
+                self._start_ai_runtime()
+        else:
+            logger.info("AI runtime disabled by config; detector and AI worker will not start")
 
         self._control_timer = QTimer(self)
         # Qt's default CoarseTimer can legitimately drift by up to ~5% (or
@@ -481,6 +497,13 @@ class MainWindow(QMainWindow):
         self._ping_timer = QTimer(self)
         self._ping_timer.timeout.connect(self.link.send_ping)
         self._ping_timer.start(5000)
+
+    def _start_ai_runtime(self) -> None:
+        if self._ai_worker_started or not self._ai_runtime_enabled:
+            return
+        self._ai_worker_started = True
+        logger.info("Starting AI worker (type=%s)", self._ai_type or "unknown")
+        self.ai_worker.start()
 
     # -- Video / tracking --------------------------------------------------
     def _on_frame(self, frame: np.ndarray) -> None:
@@ -611,7 +634,9 @@ class MainWindow(QMainWindow):
 
     def _ai_should_submit(self) -> bool:
         return (
-            self.ai_engine.enabled
+            self._ai_runtime_enabled
+            and self._ai_worker_started
+            and self.ai_engine.enabled
             and not is_fallback_source(self.ai_engine.source)
             and not self._ai_guard_paused()
         )
@@ -753,7 +778,9 @@ class MainWindow(QMainWindow):
     # -- Mode / manual override --------------------------------------------
     def _on_mode_selected(self, mode: OperatingMode) -> None:
         self.gimbal.mode = mode
-        self.ai_engine.enabled = mode in (OperatingMode.AI_ASSIST, OperatingMode.FULL_AI)
+        self.ai_engine.enabled = self._ai_runtime_enabled and mode in (OperatingMode.AI_ASSIST, OperatingMode.FULL_AI)
+        if mode in (OperatingMode.AI_ASSIST, OperatingMode.FULL_AI) and not self._ai_runtime_enabled:
+            logger.warning("AI mode selected but AI runtime is disabled by config; staying in manual tracking fallback")
         if self.ai_engine.enabled and self._ai_guard_paused():
             logger.warning("AI mode selected while Hailo guard is cooling down: %s", self._ai_suspend_reason)
         asyncio.ensure_future(self.gimbal.set_mode(mode))

@@ -1,16 +1,18 @@
 """Telemetry source labels shared by the rider UI and wire packets."""
 from __future__ import annotations
 
-FALLBACK_SOURCE_VALUES = frozenset({"unknown", "mock", "simulated", "synthetic", "null"})
+FALLBACK_SOURCE_VALUES = frozenset({"unknown", "mock", "simulated", "synthetic", "null", "initializing"})
 SOURCE_VALUE_LABELS = {
     "unknown": "UNK",
     "simulated": "SIM",
     "synthetic": "SYN",
     "null": "NULL",
+    "initializing": "INIT",
     "null_disabled": "OFF",
     "null_model": "NO HEF",
     "null_runtime": "NO HAILO",
     "null_error": "AI ERR",
+    "sim_ai": "SIM AI",
     "dev_hef": "DEV HEF",
     "mock": "MOCK",
 }

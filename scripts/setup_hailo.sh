@@ -11,6 +11,22 @@
 #   scripts/setup_hailo.sh https://.../x.hef   # download a HEF
 set -uo pipefail
 
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "This setup script is intended for Raspberry Pi OS (Linux) with a Hailo AI HAT+."
+  echo "Current OS: $(uname -s)"
+  exit 1
+fi
+
+if ! command -v apt >/dev/null 2>&1; then
+  echo "apt not found; run this script on Raspberry Pi OS / Debian-based Linux."
+  exit 1
+fi
+
+if [[ -f /proc/device-tree/model ]] && ! grep -qi "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
+  echo "This does not look like a Raspberry Pi. Hailo AI HAT+ setup needs a Raspberry Pi."
+  exit 1
+fi
+
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 MODELS="$REPO/models"
 DEST="$MODELS/yolov8n.hef"

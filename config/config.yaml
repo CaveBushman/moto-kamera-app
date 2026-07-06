@@ -8,8 +8,8 @@ video:
   fps: 30
   allow_macos_capture: false
 ai:
-  type: hailo_canary
-  model: models/yolov8n.hef
+  type: hailo
+  model: /usr/share/hailo-models/yolov8s_h8.hef
   confidence: 0.35
   startup_delay_s: 5.0
   max_fps: 2.0
@@ -24,7 +24,7 @@ ai:
   canary_max_errors: 3
   canary_compare_dot: true
   canary_compare_log_interval_s: 1.0
-  target_class: bicycle
+  target_class: cyclist
   dot_min_area: 12
   dot_max_area_ratio: 0.08
   dot_box_pad: 22

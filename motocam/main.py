@@ -372,10 +372,14 @@ def main() -> int:
     heartbeat = _install_runtime_heartbeat(config_path, window)
     logger.info("Runtime heartbeat started")
 
-    with loop:
-        logger.info("Entering Qt event loop")
-        _write_startup_state(config_path, "event_loop_entered")
+    logger.info("Entering Qt event loop")
+    _write_startup_state(config_path, "event_loop_entered")
+    try:
         loop.run_forever()
+    finally:
+        loop.stop()
+        loop.close()
+        asyncio.set_event_loop(None)
 
     heartbeat.stop()
 

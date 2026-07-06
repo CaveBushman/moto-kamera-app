@@ -43,11 +43,12 @@ hailortcli fw-control identify || true
 
 echo "4/6 Recreating venv with system packages"
 if [[ -d .venv ]]; then
-  echo ".venv already exists"
-else
-  python3 -m venv --system-site-packages .venv
+  echo ".venv exists; recreating it so system packages are visible to the app"
+  rm -rf .venv
 fi
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 python -c "import hailo_platform; print('binding OK')"
 

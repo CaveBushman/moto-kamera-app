@@ -55,10 +55,16 @@ class ControlRoomLogHandler(logging.Handler):
             message = record.getMessage()
             if record.exc_info:
                 message = f"{message}\n{self._exception_formatter.formatException(record.exc_info)}"
+            if self.link is None:
+                return
             self.link.send_log_event(record.levelname, message, record.name)
         except Exception:
             # Logging handlers must never destabilize the live moto app.
-            self.handleError(record)
+            # Swallow the error and keep going so startup / Hailo testing can continue.
+            try:
+                self.handleError(record)
+            except Exception:
+                pass
 
 
 class StartupLogBuffer(logging.Handler):

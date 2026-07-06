@@ -25,6 +25,7 @@ logger = logging.getLogger("motocam.network")
 RECONNECT_DELAY_S = 3.0
 PING_INTERVAL_S = 5.0
 LOG_QUEUE_MAX = 5000
+LOG_DRAIN_BATCH_MAX = 100
 
 
 class LinkClient(QObject):
@@ -247,14 +248,22 @@ class LinkClient(QObject):
             self._log_send_task = asyncio.ensure_future(self._drain_log_queue())
 
     async def _drain_log_queue(self) -> None:
+        sent_in_batch = 0
         while self._log_queue and self._ws is not None and self._connected:
             envelope = self._log_queue[0]
             try:
                 await self._ws.send(envelope.to_json())
                 self._log_queue.popleft()
             except Exception as exc:  # noqa: BLE001
-                logger.warning("log send failed: %s", exc)
+                # Do not log through the motocam logger here: this method
+                # *is* the log forwarder path, and recursive warning logs can
+                # refill the queue during an unstable websocket reconnect.
+                logging.getLogger("motocam.network.forwarder").debug("log send failed: %s", exc)
                 return
+            sent_in_batch += 1
+            if sent_in_batch >= LOG_DRAIN_BATCH_MAX:
+                sent_in_batch = 0
+                await asyncio.sleep(0)
 
     def send_ping(self) -> None:
         self._last_ping_sent = time.time()

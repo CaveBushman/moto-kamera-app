@@ -98,6 +98,25 @@ def _write_startup_state(config_path: Path, phase: str, extra: dict | None = Non
         pass
 
 
+def _install_runtime_heartbeat(config_path: Path, window: MainWindow) -> QTimer:
+    heartbeat = QTimer(window)
+    heartbeat.setInterval(5000)
+
+    def write_heartbeat() -> None:
+        extra: dict = {}
+        try:
+            extra["link_connected"] = bool(window.link.connected)
+            extra["runtime_started"] = bool(getattr(window, "_runtime_started", False))
+        except Exception as exc:  # noqa: BLE001 -- heartbeat must never affect the UI
+            extra["runtime_error"] = repr(exc)
+        _write_startup_state(config_path, "runtime_heartbeat", extra)
+
+    heartbeat.timeout.connect(write_heartbeat)
+    heartbeat.start()
+    write_heartbeat()
+    return heartbeat
+
+
 def _log_boot_config(logger: logging.Logger, cfg: dict, config_path: Path) -> None:
     ai_cfg = cfg.get("ai") or {}
     gimbal_cfg = cfg.get("gimbal") or {}
@@ -345,11 +364,15 @@ def main() -> int:
     ui_watchdog = UiLatencyWatchdog(parent=window, context_provider=window.pipeline_diagnostics_summary)
     ui_watchdog.start()
     logger.info("UI watchdog started")
+    heartbeat = _install_runtime_heartbeat(config_path, window)
+    logger.info("Runtime heartbeat started")
 
     with loop:
         logger.info("Entering Qt event loop")
         _write_startup_state(config_path, "event_loop_entered")
         loop.run_forever()
+
+    heartbeat.stop()
 
     return 0
 

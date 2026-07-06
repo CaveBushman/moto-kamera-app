@@ -130,7 +130,16 @@ class MainWindow(QMainWindow):
         self._ai_guard_util_pct = float(ai_cfg.get("guard_util_pct", 75.0))
         self._ai_guard_cooldown_s = float(ai_cfg.get("guard_cooldown_s", 15.0))
         self._ai_type = str(ai_cfg.get("type", "")).lower()
-        self._ai_runtime_enabled = self._ai_type in {"hailo", "simulated", "simulation", "sim"}
+        self._ai_runtime_enabled = self._ai_type in {
+            "hailo",
+            "hailo_canary",
+            "simulated",
+            "simulation",
+            "sim",
+            "dot",
+            "marker",
+            "test_dot",
+        }
         self._ai_startup_delay_s = max(0.0, float(ai_cfg.get("startup_delay_s", 0.0) or 0.0))
         self._ai_worker_started = False
         self._ai_start_timer: QTimer | None = None
@@ -140,6 +149,7 @@ class MainWindow(QMainWindow):
             csrt_slow_warn_ms=float(tracking_cfg.get("csrt_slow_warn_ms", 80.0) or 80.0),
             csrt_slow_disable_after=int(tracking_cfg.get("csrt_slow_disable_after", 12) or 0),
             algorithm=str(tracking_cfg.get("algorithm", "csrt")),
+            byte_min_hits=int(tracking_cfg.get("byte_min_hits", 3) or 3),
         )
         self.ai_engine = AiEngine(
             detector=NullDetector("initializing" if self._ai_runtime_enabled else "null_disabled"),

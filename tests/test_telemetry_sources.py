@@ -10,6 +10,9 @@ def test_source_value_display_compacts_fallbacks():
     assert source_value_display("null_model") == "NO HEF"
     assert source_value_display("null_runtime") == "NO HAILO"
     assert source_value_display("sim_ai") == "SIM AI"
+    assert source_value_display("dot_ai") == "DOT AI"
+    assert source_value_display("hailo_canary") == "HAILO TRY"
+    assert source_value_display("hailo_canary_dot") == "HAILO->DOT"
     assert source_value_display("dev_hef") == "DEV HEF"
 
 
@@ -26,3 +29,5 @@ def test_is_fallback_source():
     assert not is_fallback_source("real")
     assert not is_fallback_source("sim_ai")
     assert not is_fallback_source("hailo")
+    assert not is_fallback_source("hailo_canary")
+    assert is_fallback_source("hailo_canary_dot")

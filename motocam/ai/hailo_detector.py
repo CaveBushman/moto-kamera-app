@@ -167,6 +167,8 @@ class HailoDetector:
         # job for seconds. Tracking (CSRT) carries the target across the gap.
         self._timeout_ms = max(50, int(timeout_ms))
         self._frame_times: list[float] = []
+        self.last_inference_ok: bool | None = None
+        self.consecutive_errors = 0
 
         params = VDevice.create_params()
         self._vdevice = VDevice(params)
@@ -197,10 +199,14 @@ class HailoDetector:
             job = self._configured_model.run_async([bindings], lambda completion_info: None)
             job.wait(self._timeout_ms)
         except Exception as exc:  # noqa: BLE001 -- realtime path: skip this frame, keep running
+            self.last_inference_ok = False
+            self.consecutive_errors += 1
             logger.debug("Hailo inference skipped (timeout/error): %s", exc)
             return []
 
         nms_output = bindings.output().get_buffer()
+        self.last_inference_ok = True
+        self.consecutive_errors = 0
         self._record_fps()
         h, w = frame.shape[:2]
         return parse_nms_output(nms_output, self.labels, transform, w, h, self.min_confidence)
@@ -262,6 +268,172 @@ class SimulatedDetector:
         return (len(self._frame_times) - 1) / span if span > 0 else 0.0
 
 
+class DotDetector:
+    """Very cheap software detector for bench-testing AI assist on a marker dot.
+
+    It intentionally does not pretend to be cyclist AI. It finds small,
+    saturated bright blobs such as the orange test dot in the synthetic
+    preview, so we can tune ByteTrack/PID/gimbal response before enabling
+    Hailo again.
+    """
+
+    source = "dot_ai"
+
+    def __init__(
+        self,
+        class_name: str = "bicycle",
+        min_area: int = 12,
+        max_area_ratio: float = 0.08,
+        pad: int = 22,
+    ):
+        self.class_name = class_name or "bicycle"
+        self.min_area = max(1, int(min_area))
+        self.max_area_ratio = max(0.001, float(max_area_ratio))
+        self.pad = max(0, int(pad))
+        self._frame_times: list[float] = []
+
+    def infer(self, frame: np.ndarray) -> list[Detection]:
+        h, w = frame.shape[:2]
+        now = time.monotonic()
+        self._frame_times.append(now)
+        self._frame_times = [t for t in self._frame_times if t >= now - 2.0]
+        if h <= 0 or w <= 0:
+            return []
+
+        try:
+            import cv2
+        except Exception as exc:  # noqa: BLE001 -- AI must degrade, not break startup
+            logger.warning("Dot AI unavailable without OpenCV: %s", exc)
+            return []
+
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # Saturated and bright catches orange/red/green/blue test markers,
+        # but ignores the dark UI background and most video noise.
+        mask = cv2.inRange(hsv, np.array([0, 70, 110], dtype=np.uint8), np.array([179, 255, 255], dtype=np.uint8))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return []
+
+        max_area = float(w * h) * self.max_area_ratio
+        best: tuple[float, tuple[int, int, int, int]] | None = None
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area < self.min_area or area > max_area:
+                continue
+            x, y, bw, bh = cv2.boundingRect(contour)
+            if bw <= 0 or bh <= 0:
+                continue
+            aspect = bw / float(bh)
+            if aspect < 0.35 or aspect > 2.8:
+                continue
+            score = area / float(max(1, bw * bh))
+            if best is None or score > best[0]:
+                best = (score, (x, y, bw, bh))
+
+        if best is None:
+            return []
+        x, y, bw, bh = best[1]
+        pad = self.pad
+        x = max(0, x - pad)
+        y = max(0, y - pad)
+        bw = min(w - x, bw + pad * 2)
+        bh = min(h - y, bh + pad * 2)
+        return [Detection(x=x, y=y, w=bw, h=bh, confidence=0.96, class_name=self.class_name)]
+
+    @property
+    def fps(self) -> float:
+        if len(self._frame_times) < 2:
+            return 0.0
+        span = self._frame_times[-1] - self._frame_times[0]
+        return (len(self._frame_times) - 1) / span if span > 0 else 0.0
+
+
+class HailoCanaryDetector:
+    """Staged Hailo rollout with a software fallback.
+
+    In canary mode Hailo is allowed into the runtime, but it is not allowed
+    to be a single point of failure. Missing runtime/model, repeated
+    timeouts, or too-slow inference all degrade to DotDetector so the app
+    stays controllable while we collect logs and tune the HEF path.
+    """
+
+    source = "hailo_canary"
+
+    def __init__(
+        self,
+        primary: HailoDetector | None,
+        fallback: DotDetector,
+        max_inference_ms: float = 180.0,
+        max_consecutive_errors: int = 3,
+    ):
+        self.primary = primary
+        self.fallback = fallback
+        self.max_inference_ms = max(10.0, float(max_inference_ms or 180.0))
+        self.max_consecutive_errors = max(1, int(max_consecutive_errors or 3))
+        self._disabled_reason: str | None = "unavailable" if primary is None else None
+        self._last_primary_ms: float | None = None
+        self._last_source = "dot_ai" if primary is None else "hailo"
+        self._slow_count = 0
+
+    @property
+    def source(self) -> str:  # type: ignore[override]
+        if self._disabled_reason:
+            return "hailo_canary_dot"
+        return "hailo_canary"
+
+    def infer(self, frame: np.ndarray) -> list[Detection]:
+        if self.primary is None or self._disabled_reason is not None:
+            self._last_source = "dot_ai"
+            return self.fallback.infer(frame)
+
+        start = time.monotonic()
+        detections = self.primary.infer(frame)
+        elapsed_ms = (time.monotonic() - start) * 1000.0
+        self._last_primary_ms = elapsed_ms
+
+        if elapsed_ms > self.max_inference_ms:
+            self._slow_count += 1
+            logger.warning(
+                "Hailo canary slow inference %.0f ms > %.0f ms (slow_count=%d)",
+                elapsed_ms,
+                self.max_inference_ms,
+                self._slow_count,
+            )
+        else:
+            self._slow_count = 0
+
+        last_ok = getattr(self.primary, "last_inference_ok", True)
+        consecutive_errors = int(getattr(self.primary, "consecutive_errors", 0) or 0)
+        if last_ok is False and consecutive_errors >= self.max_consecutive_errors:
+            self._disable(f"{consecutive_errors} consecutive Hailo errors")
+            self._last_source = "dot_ai"
+            return self.fallback.infer(frame)
+        if self._slow_count >= self.max_consecutive_errors:
+            self._disable(f"{self._slow_count} consecutive slow Hailo inferences")
+            self._last_source = "dot_ai"
+            return self.fallback.infer(frame)
+
+        self._last_source = "hailo"
+        return detections
+
+    def _disable(self, reason: str) -> None:
+        if self._disabled_reason is not None:
+            return
+        self._disabled_reason = reason
+        logger.warning("Hailo canary disabled, using Dot AI fallback: %s", reason)
+        try:
+            close = getattr(self.primary, "close", None)
+            close() if close is not None else None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Hailo close after canary disable failed: %s", exc)
+
+    @property
+    def fps(self) -> float:
+        if self._last_source == "hailo" and self.primary is not None:
+            return self.primary.fps
+        return self.fallback.fps
+
+
 class DevHefDetector(SimulatedDetector):
     """Synthetic detector enabled only by a MotoCam dev HEF marker file.
 
@@ -301,13 +473,45 @@ def build_detector(cfg: dict):
         class_name = str(ai_cfg.get("target_class") or "bicycle")
         logger.warning("Simulated AI detector active -- no Hailo runtime or HEF will be used")
         return SimulatedDetector(class_name=class_name)
+    if ai_type in {"dot", "marker", "test_dot"}:
+        class_name = str(ai_cfg.get("target_class") or "bicycle")
+        logger.warning("Dot AI detector active -- bench-test marker tracking, no Hailo runtime or HEF will be used")
+        return DotDetector(
+            class_name=class_name,
+            min_area=int(ai_cfg.get("dot_min_area", 12) or 12),
+            max_area_ratio=float(ai_cfg.get("dot_max_area_ratio", 0.08) or 0.08),
+            pad=int(ai_cfg.get("dot_box_pad", 22) or 22),
+        )
+    if ai_type == "hailo_canary":
+        class_name = str(ai_cfg.get("target_class") or "bicycle")
+        fallback = DotDetector(
+            class_name=class_name,
+            min_area=int(ai_cfg.get("dot_min_area", 12) or 12),
+            max_area_ratio=float(ai_cfg.get("dot_max_area_ratio", 0.08) or 0.08),
+            pad=int(ai_cfg.get("dot_box_pad", 22) or 22),
+        )
+        primary = _build_hailo_detector(ai_cfg, cfg)
+        if primary is None:
+            logger.warning("Hailo canary started with Dot AI fallback only")
+        else:
+            logger.warning("Hailo canary active -- real Hailo inference with Dot AI fallback")
+        return HailoCanaryDetector(
+            primary=primary,
+            fallback=fallback,
+            max_inference_ms=float(ai_cfg.get("canary_max_inference_ms", ai_cfg.get("guard_inference_ms", 180)) or 180),
+            max_consecutive_errors=int(ai_cfg.get("canary_max_errors", 3) or 3),
+        )
     if ai_type != "hailo":
         return NullDetector("null_disabled")
+    return _build_hailo_detector(ai_cfg, cfg, null_on_failure=True)
+
+
+def _build_hailo_detector(ai_cfg: dict, cfg: dict, null_on_failure: bool = False):
     hef_path = ai_cfg.get("model") or ai_cfg.get("hef_path")
     if not hef_path:
         logger.warning("ai.type=hailo but no ai.model HEF path set -- using NullDetector "
                        "(run scripts/hailo_check.py; see docs/HAILO_SETUP.md)")
-        return NullDetector("null_model")
+        return NullDetector("null_model") if null_on_failure else None
     hef_path = resolve_hef_path(str(hef_path), cfg.get("_config_dir"))
     if not Path(hef_path).exists():
         logger.warning(
@@ -315,7 +519,7 @@ def build_detector(cfg: dict):
             "(run scripts/setup_hailo.sh or set ai.model to an absolute .hef path)",
             hef_path,
         )
-        return NullDetector("null_model")
+        return NullDetector("null_model") if null_on_failure else None
     if is_dev_hef(hef_path):
         class_name = str(ai_cfg.get("target_class") or "bicycle")
         logger.warning("MotoCam dev HEF active at %s -- synthetic detections only, not a real Hailo model", hef_path)
@@ -323,7 +527,7 @@ def build_detector(cfg: dict):
     if not HAILO_AVAILABLE:
         logger.warning("hailo_platform runtime not installed -- using NullDetector "
                        "(install HailoRT on the Ri5 / AI HAT+)")
-        return NullDetector("null_runtime")
+        return NullDetector("null_runtime") if null_on_failure else None
     labels = ai_cfg.get("labels")
     timeout_ms = int(ai_cfg.get("infer_timeout_ms", 500))
     try:
@@ -331,4 +535,4 @@ def build_detector(cfg: dict):
     except Exception as exc:  # noqa: BLE001 -- missing runtime/HEF must degrade, not crash
         logger.warning("Hailo detector unavailable (%s) -- using NullDetector, tap-to-select "
                        "still works (run scripts/hailo_check.py; see docs/HAILO_SETUP.md)", exc)
-        return NullDetector("null_error")
+        return NullDetector("null_error") if null_on_failure else None

@@ -78,9 +78,12 @@ def check_device() -> bool:
 
 
 def check_model(ai_cfg: dict) -> str | None:
-    if str(ai_cfg.get("type", "")).lower() != "hailo":
-        print(f"  [MISS] config ai.type is '{ai_cfg.get('type')}', not 'hailo' -> detector disabled by config")
+    ai_type = str(ai_cfg.get("type", "")).lower()
+    if ai_type not in {"hailo", "hailo_canary"}:
+        print(f"  [MISS] config ai.type is '{ai_cfg.get('type')}', not 'hailo'/'hailo_canary' -> detector disabled by config")
         return None
+    if ai_type == "hailo_canary":
+        print("  [canary] config uses hailo_canary -> Hailo will be tried with Dot AI fallback")
     model = ai_cfg.get("model")
     if not model:
         print("  [MISS] config ai.model is empty -> nothing to load")

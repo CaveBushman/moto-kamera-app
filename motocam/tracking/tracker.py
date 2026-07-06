@@ -65,6 +65,7 @@ class TrackingEngine:
         csrt_slow_warn_ms: float = CSRT_SLOW_WARN_MS,
         csrt_slow_disable_after: int = CSRT_SLOW_DISABLE_AFTER,
         algorithm: str = "csrt",
+        byte_min_hits: int = 3,
     ):
         self._tracker: cv2.Tracker | None = None
         self._bbox: tuple[int, int, int, int] | None = None
@@ -91,7 +92,7 @@ class TrackingEngine:
         self._consecutive_slow_updates = 0
         self._algorithm = str(algorithm or "csrt").lower()
         # detection-driven peloton tracking (UI-thread only, no lock)
-        self._byte = ByteTracker()
+        self._byte = ByteTracker(min_hits=max(1, int(byte_min_hits or 1)))
         self._locked_id: int | None = None
 
     @property
@@ -154,7 +155,7 @@ class TrackingEngine:
         bw = min(box_size, w - bx)
         bh = min(box_size, h - by)
         self._start(frame, (bx, by, bw, bh))
-        logger.info("Target selected at (%d, %d) (CSRT fallback)", x, y)
+        logger.info("Target selected at (%d, %d) (%s fallback)", x, y, self._algorithm.upper())
 
     def select_box(self, frame: np.ndarray, box: tuple[int, int, int, int]) -> None:
         """Auto-acquire from an AI detection box (design doc 8.3, FULL AI).
@@ -173,7 +174,14 @@ class TrackingEngine:
         bw = max(1, min(fw - bx, bw))
         bh = max(1, min(fh - by, bh))
         self._start(frame, (bx, by, bw, bh))
-        logger.info("Target auto-acquired from detection at (%d, %d, %d, %d) (CSRT)", bx, by, bw, bh)
+        logger.info(
+            "Target auto-acquired from detection at (%d, %d, %d, %d) (%s)",
+            bx,
+            by,
+            bw,
+            bh,
+            self._algorithm.upper(),
+        )
 
     def _start(self, frame: np.ndarray, box: tuple[int, int, int, int]) -> None:
         tracker_frame, scale = self._resize_for_tracker(frame)
@@ -344,7 +352,8 @@ class TrackingEngine:
         else:
             self._last_slow_log_at = now
             logger.warning(
-                "CSRT tracker update slow: %.0f ms state=%s bbox=%s slow_count=%d",
+                "%s tracker update slow: %.0f ms state=%s bbox=%s slow_count=%d",
+                self._algorithm.upper(),
                 elapsed_ms,
                 self._state.value,
                 self._bbox,
@@ -358,7 +367,8 @@ class TrackingEngine:
                     self._state = TargetState.MANUAL_REQUIRED
                     self._last_good_time = None
             logger.warning(
-                "CSRT tracker disabled after %d slow updates; use AI/ByteTrack or reselect target",
+                "%s tracker disabled after %d slow updates; use AI/ByteTrack or reselect target",
+                self._algorithm.upper(),
                 self._consecutive_slow_updates,
             )
             self._consecutive_slow_updates = 0

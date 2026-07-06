@@ -11,6 +11,8 @@ from motocam.ai.ai_engine import Detection, NullDetector
 from motocam.ai.hailo_detector import (
     DEV_HEF_MAGIC,
     DevHefDetector,
+    DotDetector,
+    HailoCanaryDetector,
     SimulatedDetector,
     build_detector,
     is_dev_hef,
@@ -99,6 +101,79 @@ def test_build_detector_uses_simulated_ai_without_hailo_runtime():
     dets = detector.infer(np.zeros((240, 320, 3), dtype=np.uint8))
     assert len(dets) == 1
     assert dets[0].class_name == "bicycle"
+
+
+def test_dot_detector_finds_bright_marker_dot():
+    detector = DotDetector(class_name="bicycle", min_area=6, pad=10)
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    frame[116:126, 156:166] = (0, 150, 255)  # orange in BGR
+
+    dets = detector.infer(frame)
+
+    assert len(dets) == 1
+    det = dets[0]
+    assert det.class_name == "bicycle"
+    assert det.confidence > 0.9
+    assert det.x <= 160 <= det.x + det.w
+    assert det.y <= 120 <= det.y + det.h
+
+
+def test_dot_detector_ignores_dark_frame():
+    detector = DotDetector()
+
+    assert detector.infer(np.zeros((240, 320, 3), dtype=np.uint8)) == []
+
+
+def test_build_detector_uses_dot_ai_without_hailo_runtime():
+    detector = build_detector({"ai": {"type": "dot", "target_class": "bicycle"}})
+
+    assert isinstance(detector, DotDetector)
+    assert detector.source == "dot_ai"
+
+
+def test_hailo_canary_without_primary_uses_dot_fallback():
+    detector = HailoCanaryDetector(primary=None, fallback=DotDetector(min_area=6, pad=10))
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    frame[116:126, 156:166] = (0, 150, 255)
+
+    dets = detector.infer(frame)
+
+    assert detector.source == "hailo_canary_dot"
+    assert len(dets) == 1
+
+
+def test_hailo_canary_disables_repeated_primary_errors():
+    class FailingPrimary:
+        source = "hailo"
+
+        def __init__(self):
+            self.last_inference_ok = False
+            self.consecutive_errors = 0
+            self.closed = False
+
+        def infer(self, _frame):
+            self.consecutive_errors += 1
+            self.last_inference_ok = False
+            return []
+
+        @property
+        def fps(self):
+            return 0.0
+
+        def close(self):
+            self.closed = True
+
+    primary = FailingPrimary()
+    detector = HailoCanaryDetector(primary=primary, fallback=DotDetector(min_area=6, pad=10), max_consecutive_errors=2)
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    frame[116:126, 156:166] = (0, 150, 255)
+
+    assert detector.infer(frame) == []
+    dets = detector.infer(frame)
+
+    assert primary.closed
+    assert detector.source == "hailo_canary_dot"
+    assert len(dets) == 1
 
 
 def test_build_detector_reports_missing_hailo_model():

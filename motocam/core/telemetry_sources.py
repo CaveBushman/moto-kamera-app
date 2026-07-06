@@ -1,7 +1,15 @@
 """Telemetry source labels shared by the rider UI and wire packets."""
 from __future__ import annotations
 
-FALLBACK_SOURCE_VALUES = frozenset({"unknown", "mock", "simulated", "synthetic", "null", "initializing"})
+FALLBACK_SOURCE_VALUES = frozenset({
+    "unknown",
+    "mock",
+    "simulated",
+    "synthetic",
+    "null",
+    "initializing",
+    "hailo_canary_dot",
+})
 SOURCE_VALUE_LABELS = {
     "unknown": "UNK",
     "simulated": "SIM",
@@ -13,6 +21,9 @@ SOURCE_VALUE_LABELS = {
     "null_runtime": "NO HAILO",
     "null_error": "AI ERR",
     "sim_ai": "SIM AI",
+    "dot_ai": "DOT AI",
+    "hailo_canary": "HAILO TRY",
+    "hailo_canary_dot": "HAILO->DOT",
     "dev_hef": "DEV HEF",
     "mock": "MOCK",
 }

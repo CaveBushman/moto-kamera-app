@@ -81,7 +81,7 @@ Then set in `config/config.yaml`:
 
 ```yaml
 ai:
-  type: hailo
+  type: hailo_canary             # safe staged rollout; use hailo only after canary is stable
   model: models/yolov8n.hef     # or an absolute path
   target_class: bicycle         # COCO has no "cyclist" -- use bicycle/person
   labels: null                  # null = default COCO order

@@ -8,25 +8,31 @@ video:
   fps: 30
   allow_macos_capture: false
 ai:
-  type: simulated
+  type: hailo_canary
   model: models/yolov8n.hef
   confidence: 0.35
   startup_delay_s: 5.0
-  max_fps: 3.0
-  max_input_width: 416
-  infer_timeout_ms: 80
-  performance_budget_pct: 20.0
-  guard_inference_ms: 180
-  guard_busy_ms: 500
-  guard_util_pct: 75
+  max_fps: 2.0
+  max_input_width: 320
+  infer_timeout_ms: 70
+  performance_budget_pct: 12.0
+  guard_inference_ms: 120
+  guard_busy_ms: 250
+  guard_util_pct: 35
   guard_cooldown_s: 15
+  canary_max_inference_ms: 120
+  canary_max_errors: 3
   target_class: bicycle
+  dot_min_area: 12
+  dot_max_area_ratio: 0.08
+  dot_box_pad: 22
   labels: null
 tracking:
   algorithm: kcf
   max_input_width: 416
   csrt_slow_warn_ms: 60
   csrt_slow_disable_after: 4
+  byte_min_hits: 1
 gimbal:
   type: dji_rs4_pro
   connection: ble

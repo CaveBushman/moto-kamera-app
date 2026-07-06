@@ -6,6 +6,7 @@ bleak, no adapter."""
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -212,30 +213,55 @@ def test_send_without_open_raises():
         asyncio.run(transport.send(b"\x01\x02"))
 
 
-def test_on_notify_enqueues_bytes():
+def test_on_notify_enqueues_bytes_from_callback_thread():
+    async def run_case():
+        transport = BleTransport(address="x")
+        transport._queue = asyncio.Queue()
+        transport._notify_loop = asyncio.get_running_loop()
+        thread = threading.Thread(target=lambda: transport._on_notify(None, bytearray(b"\x55\x12\x04")))
+        thread.start()
+        thread.join(timeout=1.0)
+        await asyncio.sleep(0)
+        assert transport._queue.get_nowait() == b"\x55\x12\x04"
+
+    asyncio.run(run_case())
+
+
+def test_on_notify_ignores_callback_after_loop_is_cleared():
     transport = BleTransport(address="x")
     transport._queue = asyncio.Queue()
     transport._on_notify(None, bytearray(b"\x55\x12\x04"))
-    assert transport._queue.get_nowait() == b"\x55\x12\x04"
+    with pytest.raises(asyncio.QueueEmpty):
+        transport._queue.get_nowait()
 
 
 def test_on_notify_drops_oldest_when_queue_is_full():
-    transport = BleTransport(address="x")
-    transport._queue = asyncio.Queue(maxsize=2)
-    transport._on_notify(None, b"\x01")
-    transport._on_notify(None, b"\x02")
-    transport._on_notify(None, b"\x03")
-    assert transport._queue.get_nowait() == b"\x02"
-    assert transport._queue.get_nowait() == b"\x03"
+    async def run_case():
+        transport = BleTransport(address="x")
+        transport._queue = asyncio.Queue(maxsize=2)
+        transport._notify_loop = asyncio.get_running_loop()
+        transport._on_notify(None, b"\x01")
+        transport._on_notify(None, b"\x02")
+        transport._on_notify(None, b"\x03")
+        await asyncio.sleep(0)
+        assert transport._queue.get_nowait() == b"\x02"
+        assert transport._queue.get_nowait() == b"\x03"
+
+    asyncio.run(run_case())
 
 
 def test_drain_returns_all_queued_and_empties():
-    transport = BleTransport(address="x")
-    transport._queue = asyncio.Queue()
-    transport._on_notify(None, b"\xaa")
-    transport._on_notify(None, b"\xbb\xcc")
-    assert asyncio.run(transport.drain()) == b"\xaa\xbb\xcc"
-    assert asyncio.run(transport.drain()) == b""  # emptied
+    async def run_case():
+        transport = BleTransport(address="x")
+        transport._queue = asyncio.Queue()
+        transport._notify_loop = asyncio.get_running_loop()
+        transport._on_notify(None, b"\xaa")
+        transport._on_notify(None, b"\xbb\xcc")
+        await asyncio.sleep(0)
+        assert await transport.drain() == b"\xaa\xbb\xcc"
+        assert await transport.drain() == b""  # emptied
+
+    asyncio.run(run_case())
 
 
 # -- MTU auto-negotiation --------------------------------------------------

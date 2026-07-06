@@ -302,6 +302,7 @@ class BleTransport:
         self._queue: asyncio.Queue[bytes] | None = None
         self._endpoint: BleEndpoint | None = None
         self._last_notify_at: float | None = None
+        self._notify_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def label(self) -> str:
@@ -339,6 +340,7 @@ class BleTransport:
         )
         self._queue = asyncio.Queue(maxsize=BLE_NOTIFY_QUEUE_MAX)
         self._last_notify_at = None
+        self._notify_loop = asyncio.get_running_loop()
         await self._client.start_notify(self._endpoint.rx_uuid, self._on_notify)
         logger.info(
             "DJI RS 4 Pro BLE connected, write=%s notify=%s response=%s mtu_payload=%d",
@@ -389,6 +391,7 @@ class BleTransport:
         self._client = None
         self._queue = None
         self._last_notify_at = None
+        self._notify_loop = None
         endpoint = self._endpoint
         self._endpoint = None
         if client is None:
@@ -498,16 +501,25 @@ class BleTransport:
             await asyncio.sleep(SERVICE_DISCOVERY_RETRY_S)
 
     def _on_notify(self, _sender, data: bytearray | bytes) -> None:
-        self._last_notify_at = time.monotonic()
-        if self._queue is not None:
+        loop = self._notify_loop
+        if loop is None or loop.is_closed():
+            return
+        payload = bytes(data)
+        timestamp = time.monotonic()
+        loop.call_soon_threadsafe(self._enqueue_notify, payload, timestamp)
+
+    def _enqueue_notify(self, data: bytes, timestamp: float) -> None:
+        self._last_notify_at = timestamp
+        if self._queue is None:
+            return
+        try:
+            self._queue.put_nowait(data)
+        except asyncio.QueueFull:
             try:
-                self._queue.put_nowait(bytes(data))
-            except asyncio.QueueFull:
-                try:
-                    self._queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-                self._queue.put_nowait(bytes(data))
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            self._queue.put_nowait(data)
 
     @classmethod
     def _select_characteristics(

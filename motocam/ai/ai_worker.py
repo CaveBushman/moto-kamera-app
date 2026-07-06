@@ -35,6 +35,14 @@ except Exception:  # noqa: BLE001 -- pure numpy fallback keeps tests importable 
     cv2 = None
 
 
+def _select_resize_interpolation(src_w: int, src_h: int, dst_w: int, dst_h: int):
+    if cv2 is None:
+        return None
+    if dst_w >= src_w and dst_h >= src_h:
+        return cv2.INTER_LINEAR
+    return cv2.INTER_AREA
+
+
 def _resize_for_inference(frame: np.ndarray, max_width: int) -> tuple[np.ndarray, float]:
     """Return a smaller inference frame plus the scale back to source pixels.
 
@@ -51,7 +59,8 @@ def _resize_for_inference(frame: np.ndarray, max_width: int) -> tuple[np.ndarray
     scale = max_width / float(width)
     target_size = (max_width, max(1, int(round(height * scale))))
     if cv2 is not None:
-        resized = cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
+        interpolation = _select_resize_interpolation(width, height, target_size[0], target_size[1])
+        resized = cv2.resize(frame, target_size, interpolation=interpolation)
     else:
         ys = np.linspace(0, height - 1, target_size[1]).astype(int)
         xs = np.linspace(0, width - 1, target_size[0]).astype(int)

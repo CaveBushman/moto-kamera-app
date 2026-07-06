@@ -70,6 +70,16 @@ class LetterboxTransform:
     model_size: int
 
 
+def _select_resize_interpolation(src_w: int, src_h: int, dst_w: int, dst_h: int):
+    try:
+        import cv2
+    except Exception:  # noqa: BLE001
+        return None
+    if dst_w >= src_w and dst_h >= src_h:
+        return cv2.INTER_LINEAR
+    return cv2.INTER_AREA
+
+
 def letterbox(frame: np.ndarray, model_size: int) -> tuple[np.ndarray, LetterboxTransform]:
     """Resize `frame` to fit a `model_size` x `model_size` input while
     preserving aspect ratio, padding the remainder with grey. Returns the
@@ -83,7 +93,8 @@ def letterbox(frame: np.ndarray, model_size: int) -> tuple[np.ndarray, Letterbox
     try:
         import cv2
 
-        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        interpolation = _select_resize_interpolation(w, h, new_w, new_h)
+        resized = cv2.resize(frame, (new_w, new_h), interpolation=interpolation)
     except Exception:  # noqa: BLE001 -- pure fallback for headless/test use
         ys = (np.linspace(0, h - 1, new_h)).astype(int)
         xs = (np.linspace(0, w - 1, new_w)).astype(int)
@@ -183,20 +194,20 @@ class HailoDetector:
         self._model_size = int(input_shape[0])
         self._output_name = self._infer_model.output().name
         self._output_shape = self._infer_model.output().shape
+        output_buffers = {self._output_name: np.empty(self._output_shape, dtype=np.float32)}
+        self._bindings = self._configured_model.create_bindings(output_buffers=output_buffers)
         logger.info("Hailo detector ready: %s, input %dx%d", hef_path, self._model_size, self._model_size)
 
     def infer(self, frame: np.ndarray) -> list[Detection]:
         padded, transform = letterbox(frame, self._model_size)
-        output_buffers = {self._output_name: np.empty(self._output_shape, dtype=np.float32)}
-        bindings = self._configured_model.create_bindings(output_buffers=output_buffers)
-        bindings.input().set_buffer(padded)
+        self._bindings.input().set_buffer(padded)
 
         # A timeout here (accelerator busy/stalled) must degrade to "no
         # detection this frame", never raise up into the worker/UI. CSRT
         # keeps the current target locked across the gap.
         try:
             self._configured_model.wait_for_async_ready(timeout_ms=self._timeout_ms)
-            job = self._configured_model.run_async([bindings], lambda completion_info: None)
+            job = self._configured_model.run_async([self._bindings], lambda completion_info: None)
             job.wait(self._timeout_ms)
         except Exception as exc:  # noqa: BLE001 -- realtime path: skip this frame, keep running
             self.last_inference_ok = False
@@ -204,7 +215,7 @@ class HailoDetector:
             logger.debug("Hailo inference skipped (timeout/error): %s", exc)
             return []
 
-        nms_output = bindings.output().get_buffer()
+        nms_output = self._bindings.output().get_buffer()
         self.last_inference_ok = True
         self.consecutive_errors = 0
         self._record_fps()

@@ -584,7 +584,9 @@ def build_detector(cfg: dict):
             compare_log_interval_s=float(ai_cfg.get("canary_compare_log_interval_s", 1.0) or 1.0),
         )
     if ai_type != "hailo":
+        logger.info("AI detector config disabled: ai.type=%s", ai_type or "<empty>")
         return NullDetector("null_disabled")
+    logger.info("AI detector build requested: ai.type=hailo model=%s", ai_cfg.get("model") or "<unset>")
     return _build_hailo_detector(ai_cfg, cfg, null_on_failure=True)
 
 
@@ -613,7 +615,9 @@ def _build_hailo_detector(ai_cfg: dict, cfg: dict, null_on_failure: bool = False
     labels = ai_cfg.get("labels")
     timeout_ms = int(ai_cfg.get("infer_timeout_ms", 500))
     try:
-        return HailoDetector(hef_path, labels=labels, timeout_ms=timeout_ms)
+        detector = HailoDetector(hef_path, labels=labels, timeout_ms=timeout_ms)
+        logger.info("Hailo detector initialized successfully: %s", hef_path)
+        return detector
     except Exception as exc:  # noqa: BLE001 -- missing runtime/HEF must degrade, not crash
         logger.warning("Hailo detector unavailable (%s) -- using NullDetector, tap-to-select "
                        "still works (run scripts/hailo_check.py; see docs/HAILO_SETUP.md)", exc)

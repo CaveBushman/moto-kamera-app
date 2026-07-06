@@ -20,7 +20,6 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import qasync
 from PyQt6.QtCore import QRect, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QSplashScreen
@@ -297,9 +296,9 @@ def main() -> int:
     logger.info("Splash screen shown")
     _write_startup_state(config_path, "splash_shown")
 
-    loop = qasync.QEventLoop(app)
+    loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    logger.info("Qt asyncio event loop installed")
+    logger.info("Asyncio event loop installed")
     _write_startup_state(config_path, "event_loop_installed")
 
     logger.info("Building video backend")
@@ -357,7 +356,13 @@ def main() -> int:
     splash.finish(window)
     logger.info("Splash screen finished")
     _write_startup_state(config_path, "splash_finished")
-    QTimer.singleShot(0, window.start_runtime)
+    def _kickoff_runtime() -> None:
+        try:
+            window.start_runtime()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Runtime startup failed: %s", exc)
+
+    QTimer.singleShot(0, _kickoff_runtime)
 
     # Field canary: warns to the log if anything ever blocks the UI thread
     # again (all the heavy work is now off it). Silent on a healthy unit.

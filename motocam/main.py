@@ -80,11 +80,13 @@ def build_video(cfg: dict) -> VideoEngine:
     device = video_cfg.get("device", 0)
     if isinstance(device, str) and device.startswith("/dev/video"):
         device = int(device.replace("/dev/video", "")) if device.replace("/dev/video", "").isdigit() else device
+    allow_macos_capture = bool(video_cfg.get("allow_macos_capture", sys.platform != "darwin"))
     return VideoEngine(
         device=device,
         width=video_cfg.get("width", 1920),
         height=video_cfg.get("height", 1080),
         fps=video_cfg.get("fps", 30),
+        allow_macos_capture=allow_macos_capture,
     )
 
 
@@ -161,18 +163,26 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
     app.setStyleSheet(DARK_STYLESHEET)
+    logger.info("Qt application created")
     splash = create_splash()
     splash.show()
     app.processEvents()
+    logger.info("Splash screen shown")
 
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
+    logger.info("Qt asyncio event loop installed")
 
+    logger.info("Building video backend")
     video_engine = build_video(cfg)
+    logger.info("Building gimbal backend")
     gimbal = build_gimbal(cfg)
+    logger.info("Building camera backend")
     camera = build_camera(cfg)
+    logger.info("Building GPS backend")
     gps = build_gps(cfg)
     health = HealthMonitor()
+    logger.info("Hardware backends created")
 
     telemetry_cfg = cfg.get("telemetry", {})
     link = LinkClient(
@@ -180,8 +190,10 @@ def main() -> int:
         unit_id=cfg.get("unit_id", "moto-1"),
     )
     install_control_room_log_forwarder(logging.getLogger("motocam"), link)
+    logger.info("Control room link created: %s", telemetry_cfg.get("control_room_url", "ws://127.0.0.1:8765"))
 
     camera_cfg = cfg.get("camera", {})
+    logger.info("Creating main window")
     window = MainWindow(
         video_engine, gimbal, camera, gps, link, health,
         unit_id=cfg.get("unit_id", "moto-1"),
@@ -190,26 +202,40 @@ def main() -> int:
         config=cfg,
         config_path=config_path,
     )
+    logger.info("Main window created")
     # Fullscreen on the kiosk touchscreen (no title bar / desktop taskbar
     # eating space); windowed on a dev desktop. Config-driven so the Mac
     # stays windowed.
-    if bool(display_cfg.get("fullscreen", False)):
+    fullscreen = bool(display_cfg.get("fullscreen", False))
+    if sys.platform == "darwin" and fullscreen and not bool(display_cfg.get("allow_macos_fullscreen", False)):
+        logger.info("macOS fullscreen disabled by display.allow_macos_fullscreen=false")
+        fullscreen = False
+
+    if fullscreen:
         window.showFullScreen()
+        logger.info("Main window shown fullscreen")
     else:
         window.show()
+        logger.info("Main window shown windowed")
     QTimer.singleShot(1200, lambda: splash.finish(window))
 
+    logger.info("Opening GPS")
     gps.open()
+    logger.info("Starting video engine")
     video_engine.start()
+    logger.info("Starting control room link")
     link.start()
 
     # Field canary: warns to the log if anything ever blocks the UI thread
     # again (all the heavy work is now off it). Silent on a healthy unit.
     ui_watchdog = UiLatencyWatchdog(parent=window, context_provider=window.pipeline_diagnostics_summary)
     ui_watchdog.start()
+    logger.info("UI watchdog started")
 
     with loop:
+        logger.info("Scheduling async hardware connect")
         loop.create_task(async_connect_all(gimbal, camera))
+        logger.info("Entering Qt event loop")
         loop.run_forever()
 
     return 0

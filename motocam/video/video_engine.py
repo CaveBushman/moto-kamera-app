@@ -17,6 +17,8 @@ touches the device from the UI thread while a read is in flight.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
 import time
 from collections import deque
@@ -29,24 +31,43 @@ logger = logging.getLogger("motocam.video")
 
 FPS_EMIT_INTERVAL_S = 0.5
 
+if sys.platform == "darwin":
+    # OpenCV's AVFoundation backend tries to request camera permission by
+    # spinning the macOS main run loop. Our capture opens in a worker thread,
+    # so that permission path can hang or print "can not spin main run loop
+    # from other thread". We prefer an immediate synthetic fallback on dev
+    # Macs; real capture permissions should be granted by launching from a
+    # normal app shell before race-day testing.
+    os.environ.setdefault("OPENCV_AVFOUNDATION_SKIP_AUTH", "1")
+
 
 class VideoEngine(QObject):
     frame_ready = pyqtSignal(np.ndarray)
     fps_updated = pyqtSignal(float)
     status_changed = pyqtSignal(str)  # "connected" | "reconnecting" | "lost" | "synthetic"
 
-    def __init__(self, device: str | int = 0, width: int = 1920, height: int = 1080, fps: int = 30):
+    def __init__(
+        self,
+        device: str | int = 0,
+        width: int = 1920,
+        height: int = 1080,
+        fps: int = 30,
+        allow_macos_capture: bool = True,
+    ):
         super().__init__()
         self._device = device
         self._width = width
         self._height = height
         self._target_fps = fps
+        self._allow_macos_capture = allow_macos_capture
         self._cap: cv2.VideoCapture | None = None
         self._running = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._reopen = False
         self._synthetic = False
+        self._frame_in_flight = False
+        self._dropped_frames = 0
         self._frame_times: deque[float] = deque()
         self._last_fps_emit_at: float | None = None
         self._t = 0.0
@@ -94,11 +115,39 @@ class VideoEngine(QObject):
     def source(self) -> str:
         return "synthetic" if self._synthetic else "real"
 
+    def mark_frame_delivered(self) -> None:
+        """Called by the UI slot after it has accepted a frame.
+
+        PyQt queued signals copy only references, but the event queue can
+        still accumulate many full-resolution numpy frames when capture is
+        faster than rendering/tracking. Keep at most one frame in flight so
+        live video drops stale frames instead of growing memory until the
+        app appears frozen.
+        """
+        with self._lock:
+            self._frame_in_flight = False
+
+    @property
+    def dropped_frames(self) -> int:
+        with self._lock:
+            return self._dropped_frames
+
     def _open_capture(self) -> None:
         """Open self._device into self._cap. Called only from the loop
         thread (directly or via a requested reopen)."""
         with self._lock:
             device = self._device
+        if sys.platform == "darwin" and not self._allow_macos_capture:
+            with self._lock:
+                self._cap = None
+            self._synthetic = True
+            self.status_changed.emit("synthetic")
+            logger.warning(
+                "macOS UVC capture disabled by config, using synthetic test pattern "
+                "(set video.allow_macos_capture=true to use AVFoundation)"
+            )
+            return
+
         cap = cv2.VideoCapture(device)
         if cap.isOpened():
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
@@ -153,7 +202,15 @@ class VideoEngine(QObject):
 
             self._record_fps()
             if self._running:
-                self.frame_ready.emit(frame)
+                with self._lock:
+                    if self._frame_in_flight:
+                        self._dropped_frames += 1
+                        should_emit = False
+                    else:
+                        self._frame_in_flight = True
+                        should_emit = True
+                if should_emit:
+                    self.frame_ready.emit(frame)
             self._sleep_remaining(frame_start, interval)
 
     @staticmethod

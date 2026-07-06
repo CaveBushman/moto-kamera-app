@@ -29,7 +29,11 @@ def test_synthetic_frames_delivered_on_ui_thread(qapp):
     frames: list = []
     delivery_thread: dict = {}
     main_thread = threading.get_ident()
-    ve.frame_ready.connect(lambda f: frames.append(f.shape))
+    def on_frame(f):
+        frames.append(f.shape)
+        ve.mark_frame_delivered()
+
+    ve.frame_ready.connect(on_frame)
     ve.frame_ready.connect(lambda f: delivery_thread.setdefault("id", threading.get_ident()))
 
     ve.start()
@@ -46,12 +50,42 @@ def test_synthetic_frames_delivered_on_ui_thread(qapp):
     assert delivery_thread.get("id") == main_thread
 
 
+def test_video_engine_keeps_only_one_queued_frame(qapp):
+    ve = VideoEngine(device="/dev/motocam-nonexistent", width=160, height=120, fps=120)
+    frames: list = []
+    ve.frame_ready.connect(lambda f: frames.append(f.shape))
+
+    ve.start()
+    try:
+        _pump(qapp, lambda: len(frames) >= 1 and ve.dropped_frames > 0, timeout_s=1.0)
+    finally:
+        ve.stop()
+    qapp.processEvents()
+
+    assert len(frames) == 1
+    assert ve.dropped_frames > 0
+
+
 def test_stop_joins_capture_thread(qapp):
     ve = VideoEngine(device="/dev/motocam-nonexistent", width=160, height=120, fps=60)
     ve.start()
     _pump(qapp, lambda: False, timeout_s=0.2)  # let the loop spin up
     ve.stop()
     assert ve._thread is None or not ve._thread.is_alive()
+
+
+def test_macos_capture_can_be_disabled(monkeypatch, qapp):
+    monkeypatch.setattr(video_engine_module.sys, "platform", "darwin")
+    ve = VideoEngine(device=1, width=160, height=120, fps=30, allow_macos_capture=False)
+    statuses: list[str] = []
+    ve.status_changed.connect(statuses.append)
+
+    ve._open_capture()
+    qapp.processEvents()
+
+    assert ve.source == "synthetic"
+    assert ve._cap is None
+    assert statuses == ["synthetic"]
 
 
 def test_fps_signal_is_throttled(monkeypatch):

@@ -57,11 +57,14 @@ def test_frame_fanout_runs_off_thread_and_shuts_down_clean(qapp):
     seen = {"frames": 0}
 
     def on_frame(frame: np.ndarray) -> None:
-        seen["frames"] += 1
-        if seen["frames"] == 1:
-            tracker.select_at(frame, 80, 60)  # lock a target on the first frame
-        tracker.submit(frame)
-        ai.submit(frame)
+        try:
+            seen["frames"] += 1
+            if seen["frames"] == 1:
+                tracker.select_at(frame, 80, 60)  # lock a target on the first frame
+            tracker.submit(frame)
+            ai.submit(frame)
+        finally:
+            video.mark_frame_delivered()
 
     video.frame_ready.connect(on_frame)
 

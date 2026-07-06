@@ -492,6 +492,8 @@ class MainWindow(QMainWindow):
             self._process_frame(frame)
         except Exception as exc:  # noqa: BLE001 -- one frame failing must not stop the feed
             logger.warning("frame processing error (skipped): %s", exc)
+        finally:
+            self.video_engine.mark_frame_delivered()
 
     def _process_frame(self, frame: np.ndarray) -> None:
         frame_started = time.monotonic()
@@ -964,6 +966,7 @@ class MainWindow(QMainWindow):
             f"cpu={self._fmt_pct(getattr(sys_stats, 'cpu_pct', None))} "
             f"temp={self._fmt_c(getattr(sys_stats, 'temperature_c', None))} "
             f"video_fps={getattr(sys_stats, 'video_fps', None) or 0:.0f} "
+            f"video_drop={self.video_engine.dropped_frames} "
             f"sources=vid:{source_value_display(self.video_engine.source)} "
             f"gmb:{source_value_display(self.gimbal.source)}"
         )

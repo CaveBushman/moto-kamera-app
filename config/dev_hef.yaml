@@ -7,7 +7,7 @@ video:
   allow_macos_capture: false
 ai:
   type: hailo
-  model: models/yolov8n.hef
+  model: ../models/dev_cyclist.hef
   confidence: 0.35
   max_fps: 3.0
   max_input_width: 416
@@ -22,33 +22,13 @@ ai:
 tracking:
   max_input_width: 640
 gimbal:
-  type: dji_rs4_pro
-  connection: ble
-  ble_name: DJI RS4 PRO-094PP0
-  ble_address: 5B36F71C-E8C8-CA4B-5578-0774EB33DE88
-  ble_service_uuid: null
-  ble_tx_char_uuid: null
-  ble_rx_char_uuid: null
-  ble_velocity_timeout_s: 0.15
-  ble_notify_stale_s: 3.0
-  can_channel: can0
-  can_bitrate: 1000000
-  uart_device: /dev/ttyAMA0
-  uart_baudrate: 115200
+  type: mock
   max_pan_speed: 20
   max_tilt_speed: 12
 camera:
-  type: blackmagic_rest
-  ip: 192.168.9.20
-  port: 9993
-  rest_port: 80
-  use_tls: false
-  verify_tls: false
-  username: null
-  password: null
-  auth_token: null
+  type: mock
 gps:
-  device: auto
+  device: null
   baudrate: 9600
 telemetry:
   control_room_url: ws://127.0.0.1:8765
@@ -60,11 +40,11 @@ audio:
   input_device: null
   output_device: null
 display:
-  ui_scale: 1.5
-  controls_scale: 1.4
+  ui_scale: 1.0
+  controls_scale: 1.0
   preview_fps: 20
   preview_smooth_scaling: false
-  fullscreen: true
+  fullscreen: false
   allow_macos_fullscreen: false
 safety:
   ride_lock_enabled: false

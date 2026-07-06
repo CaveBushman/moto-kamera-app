@@ -23,9 +23,10 @@ ai:
   target_class: bicycle
   labels: null
 tracking:
-  max_input_width: 640
-  csrt_slow_warn_ms: 80
-  csrt_slow_disable_after: 12
+  algorithm: kcf
+  max_input_width: 416
+  csrt_slow_warn_ms: 60
+  csrt_slow_disable_after: 4
 gimbal:
   type: dji_rs4_pro
   connection: ble

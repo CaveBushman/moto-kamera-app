@@ -139,6 +139,7 @@ class MainWindow(QMainWindow):
             max_input_width=int(tracking_cfg.get("max_input_width", 640) or 0),
             csrt_slow_warn_ms=float(tracking_cfg.get("csrt_slow_warn_ms", 80.0) or 80.0),
             csrt_slow_disable_after=int(tracking_cfg.get("csrt_slow_disable_after", 12) or 0),
+            algorithm=str(tracking_cfg.get("algorithm", "csrt")),
         )
         self.ai_engine = AiEngine(
             detector=NullDetector("initializing" if self._ai_runtime_enabled else "null_disabled"),

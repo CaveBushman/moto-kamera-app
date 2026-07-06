@@ -64,6 +64,7 @@ class TrackingEngine:
         max_input_width: int = 0,
         csrt_slow_warn_ms: float = CSRT_SLOW_WARN_MS,
         csrt_slow_disable_after: int = CSRT_SLOW_DISABLE_AFTER,
+        algorithm: str = "csrt",
     ):
         self._tracker: cv2.Tracker | None = None
         self._bbox: tuple[int, int, int, int] | None = None
@@ -88,6 +89,7 @@ class TrackingEngine:
         self._csrt_slow_warn_ms = max(1.0, float(csrt_slow_warn_ms))
         self._csrt_slow_disable_after = max(0, int(csrt_slow_disable_after))
         self._consecutive_slow_updates = 0
+        self._algorithm = str(algorithm or "csrt").lower()
         # detection-driven peloton tracking (UI-thread only, no lock)
         self._byte = ByteTracker()
         self._locked_id: int | None = None
@@ -177,7 +179,7 @@ class TrackingEngine:
         tracker_frame, scale = self._resize_for_tracker(frame)
         tracker_box = self._scale_box(box, scale)
         with self._lock:
-            self._tracker = self._new_tracker()
+            self._tracker = self._new_tracker(self._algorithm)
             self._tracker.init(tracker_frame, tracker_box)
             self._tracker_scale = scale
             self._bbox = box
@@ -229,7 +231,7 @@ class TrackingEngine:
         """Hand the newest frame to the worker (drops any older un-processed
         one). Cheap and non-blocking -- safe to call from the UI frame
         callback every frame."""
-        if not self.needs_frame_updates:
+        if not self._needs_frame_updates_nonblocking():
             return
         with self._frame_lock:
             had_pending = self._frame_latest is not None
@@ -246,6 +248,25 @@ class TrackingEngine:
             return False
         with self._lock:
             return self._tracker is not None
+
+    def _needs_frame_updates_nonblocking(self) -> bool:
+        """UI-frame path guard.
+
+        The tracker worker holds `_lock` while OpenCV update() runs. On a
+        Pi that can take 80+ ms; if the UI thread waits for the same lock,
+        the app *looks frozen*. If the lock is busy, skip this frame and
+        keep the UI/live link responsive.
+        """
+        if self._locked_id is not None:
+            return False
+        if not self._lock.acquire(blocking=False):
+            with self._stats_lock:
+                self._dropped_frames += 1
+            return False
+        try:
+            return self._tracker is not None
+        finally:
+            self._lock.release()
 
     def _take(self) -> np.ndarray | None:
         with self._frame_lock:
@@ -298,10 +319,11 @@ class TrackingEngine:
         now = time.monotonic()
         with self._stats_lock:
             busy_ms = ((now - self._busy_started_at) * 1000.0) if self._busy_started_at is not None else None
-            mode = "byte" if self._locked_id is not None else ("csrt" if self._tracker is not None else "idle")
+            mode = "byte" if self._locked_id is not None else (self._algorithm if self._tracker is not None else "idle")
             return {
                 "mode": mode,
                 "max_input_width": self._max_input_width,
+                "algorithm": self._algorithm,
                 "submitted_frames": self._submitted_frames,
                 "dropped_frames": self._dropped_frames,
                 "completed_updates": self._completed_updates,
@@ -388,7 +410,12 @@ class TrackingEngine:
         return target_cx - w / 2, target_cy - h / 2
 
     @staticmethod
-    def _new_tracker() -> cv2.Tracker:
+    def _new_tracker(algorithm: str = "csrt") -> cv2.Tracker:
+        if algorithm == "kcf":
+            if hasattr(cv2, "TrackerKCF_create"):
+                return cv2.TrackerKCF_create()
+            if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerKCF_create"):
+                return cv2.legacy.TrackerKCF_create()
         if hasattr(cv2, "TrackerCSRT_create"):
             return cv2.TrackerCSRT_create()
         if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerCSRT_create"):

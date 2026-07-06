@@ -131,7 +131,7 @@ def test_csrt_fallback_can_run_on_downscaled_frame(monkeypatch):
 
     fake_tracker.init.side_effect = init_probe
     fake_tracker.update.return_value = (True, (150, 100, 60, 60))
-    monkeypatch.setattr(TrackingEngine, "_new_tracker", staticmethod(lambda: fake_tracker))
+    monkeypatch.setattr(TrackingEngine, "_new_tracker", staticmethod(lambda _algorithm="csrt": fake_tracker))
 
     engine = TrackingEngine(max_input_width=320)
     engine.select_at(FRAME, 320, 240)
@@ -168,6 +168,20 @@ def test_submit_ignores_idle_tracker_to_avoid_cpu_wakeups():
     engine = TrackingEngine()
     engine.submit(FRAME)
     assert engine._take() is None
+
+
+def test_submit_drops_frame_instead_of_waiting_on_busy_tracker_lock():
+    engine = TrackingEngine()
+    engine.select_at(FRAME, 320, 240)
+    assert engine._lock.acquire(blocking=False)
+    try:
+        before = engine.stats()["dropped_frames"]
+        engine.submit(FRAME)
+    finally:
+        engine._lock.release()
+
+    assert engine._take() is None
+    assert engine.stats()["dropped_frames"] == before + 1
 
 
 def test_worker_thread_runs_update_and_publishes_bbox():

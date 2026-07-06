@@ -6,7 +6,7 @@ video:
   fps: 30
 ai:
   type: hailo
-  model: models/yolov8n.hef
+  model: ../models/dev_cyclist.hef
   confidence: 0.35
   max_fps: 3.0
   max_input_width: 416
@@ -18,6 +18,8 @@ ai:
   guard_cooldown_s: 15
   target_class: bicycle
   labels: null
+tracking:
+  max_input_width: 640
 gimbal:
   type: dji_rs4_pro
   connection: ble

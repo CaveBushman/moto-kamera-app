@@ -11,6 +11,7 @@ SOURCE_VALUE_LABELS = {
     "null_model": "NO HEF",
     "null_runtime": "NO HAILO",
     "null_error": "AI ERR",
+    "dev_hef": "DEV HEF",
     "mock": "MOCK",
 }
 

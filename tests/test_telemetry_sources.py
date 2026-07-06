@@ -8,6 +8,7 @@ def test_source_value_display_compacts_fallbacks():
     assert source_value_display("null") == "NULL"
     assert source_value_display("null_model") == "NO HEF"
     assert source_value_display("null_runtime") == "NO HAILO"
+    assert source_value_display("dev_hef") == "DEV HEF"
 
 
 def test_source_value_display_preserves_real_backend_identity():

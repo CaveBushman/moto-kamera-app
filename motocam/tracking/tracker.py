@@ -57,11 +57,13 @@ class TrackingEngine:
     the published target.
     """
 
-    def __init__(self):
+    def __init__(self, max_input_width: int = 0):
         self._tracker: cv2.Tracker | None = None
         self._bbox: tuple[int, int, int, int] | None = None
         self._state: TargetState = TargetState.IDLE
         self._last_good_time: float | None = None
+        self._max_input_width = max(0, int(max_input_width or 0))
+        self._tracker_scale = 1.0
         self._lock = threading.Lock()  # guards the cv2 tracker + published state
         self._frame_lock = threading.Lock()  # guards only the latest-frame handoff
         self._frame_latest: np.ndarray | None = None
@@ -162,9 +164,12 @@ class TrackingEngine:
         logger.info("Target auto-acquired from detection at (%d, %d, %d, %d) (CSRT)", bx, by, bw, bh)
 
     def _start(self, frame: np.ndarray, box: tuple[int, int, int, int]) -> None:
+        tracker_frame, scale = self._resize_for_tracker(frame)
+        tracker_box = self._scale_box(box, scale)
         with self._lock:
             self._tracker = self._new_tracker()
-            self._tracker.init(frame, box)
+            self._tracker.init(tracker_frame, tracker_box)
+            self._tracker_scale = scale
             self._bbox = box
             self._state = TargetState.LOCKED
             self._last_good_time = time.monotonic()
@@ -173,6 +178,7 @@ class TrackingEngine:
         self._locked_id = None
         with self._lock:
             self._tracker = None
+            self._tracker_scale = 1.0
             self._bbox = None
             self._state = TargetState.IDLE
             self._last_good_time = None
@@ -183,14 +189,15 @@ class TrackingEngine:
         # fight over the published target.
         if self._locked_id is not None:
             return
+        tracker_frame, _ = self._resize_for_tracker(frame)
         with self._lock:
             if self._tracker is None:
                 return
 
-            ok, box = self._tracker.update(frame)
+            ok, box = self._tracker.update(tracker_frame)
             now = time.monotonic()
             if ok:
-                self._bbox = tuple(int(v) for v in box)
+                self._bbox = self._unscale_box(tuple(float(v) for v in box), self._tracker_scale)
                 self._last_good_time = now
                 self._state = TargetState.LOCKED
                 return
@@ -284,6 +291,7 @@ class TrackingEngine:
             mode = "byte" if self._locked_id is not None else ("csrt" if self._tracker is not None else "idle")
             return {
                 "mode": mode,
+                "max_input_width": self._max_input_width,
                 "submitted_frames": self._submitted_frames,
                 "dropped_frames": self._dropped_frames,
                 "completed_updates": self._completed_updates,
@@ -304,6 +312,42 @@ class TrackingEngine:
             elapsed_ms,
             self._state.value,
             self._bbox,
+        )
+
+    def _resize_for_tracker(self, frame: np.ndarray) -> tuple[np.ndarray, float]:
+        if self._max_input_width <= 0:
+            return frame, 1.0
+        h, w = frame.shape[:2]
+        if w <= self._max_input_width:
+            return frame, 1.0
+        scale = self._max_input_width / float(w)
+        target_h = max(1, int(round(h * scale)))
+        resized = cv2.resize(frame, (self._max_input_width, target_h), interpolation=cv2.INTER_AREA)
+        return resized, scale
+
+    @staticmethod
+    def _scale_box(box: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
+        if scale == 1.0:
+            return box
+        bx, by, bw, bh = box
+        return (
+            int(round(bx * scale)),
+            int(round(by * scale)),
+            max(1, int(round(bw * scale))),
+            max(1, int(round(bh * scale))),
+        )
+
+    @staticmethod
+    def _unscale_box(box: tuple[float, float, float, float], scale: float) -> tuple[int, int, int, int]:
+        if scale <= 0 or scale == 1.0:
+            return tuple(int(round(v)) for v in box)
+        inv = 1.0 / scale
+        bx, by, bw, bh = box
+        return (
+            int(round(bx * inv)),
+            int(round(by * inv)),
+            max(1, int(round(bw * inv))),
+            max(1, int(round(bh * inv))),
         )
 
     def error_from_center(self, frame_shape: tuple[int, int]) -> tuple[float, float] | None:

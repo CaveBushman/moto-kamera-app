@@ -9,7 +9,10 @@ import numpy as np
 
 from motocam.ai.ai_engine import Detection, NullDetector
 from motocam.ai.hailo_detector import (
+    DEV_HEF_MAGIC,
+    DevHefDetector,
     build_detector,
+    is_dev_hef,
     letterbox,
     parse_nms_output,
     resolve_hef_path,
@@ -91,6 +94,30 @@ def test_build_detector_reports_missing_hailo_model():
     detector = build_detector({"ai": {"type": "hailo", "model": "/nonexistent.hef"}})
     assert isinstance(detector, NullDetector)
     assert detector.source == "null_model"
+
+
+def test_build_detector_uses_dev_hef_marker_without_hailo_runtime(tmp_path):
+    model = tmp_path / "dev_cyclist.hef"
+    model.write_bytes(DEV_HEF_MAGIC + b"test marker")
+
+    detector = build_detector({"ai": {"type": "hailo", "model": str(model), "target_class": "bicycle"}})
+
+    assert isinstance(detector, DevHefDetector)
+    assert detector.source == "dev_hef"
+    dets = detector.infer(np.zeros((480, 640, 3), dtype=np.uint8))
+    assert len(dets) == 1
+    assert dets[0].class_name == "bicycle"
+    assert dets[0].confidence > 0.9
+
+
+def test_is_dev_hef_requires_marker_prefix(tmp_path):
+    dev = tmp_path / "dev.hef"
+    realish = tmp_path / "real.hef"
+    dev.write_bytes(DEV_HEF_MAGIC + b"payload")
+    realish.write_bytes(b"not the marker")
+
+    assert is_dev_hef(dev)
+    assert not is_dev_hef(realish)
 
 
 def test_resolve_hef_path_prefers_config_directory(tmp_path):

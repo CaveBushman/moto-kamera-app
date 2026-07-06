@@ -20,3 +20,10 @@ looks for is set by `ai.model` in `config/config.yaml`.
   and list its classes under `ai.labels`.
 
 See `docs/HAILO_SETUP.md` for the full procedure.
+
+## Development marker
+
+`models/dev_cyclist.hef` is intentionally **not** a real Hailo executable.
+It is a tiny MotoCam marker file used on a dev machine to enable the
+synthetic `DEV HEF` detector, so AI ASSIST / FULL AI / ByteTrack can be
+tested before a compiled model is available. Do not use it for a race.

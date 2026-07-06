@@ -108,6 +108,28 @@ def test_reacquired_target_after_weak_returns_to_locked(monkeypatch):
     assert engine.bbox == (300, 220, 120, 120)
 
 
+def test_csrt_fallback_can_run_on_downscaled_frame(monkeypatch):
+    fake_tracker = MagicMock()
+    init_args = {}
+
+    def init_probe(frame, box):
+        init_args["shape"] = frame.shape
+        init_args["box"] = box
+
+    fake_tracker.init.side_effect = init_probe
+    fake_tracker.update.return_value = (True, (150, 100, 60, 60))
+    monkeypatch.setattr(TrackingEngine, "_new_tracker", staticmethod(lambda: fake_tracker))
+
+    engine = TrackingEngine(max_input_width=320)
+    engine.select_at(FRAME, 320, 240)
+    assert init_args["shape"][:2] == (240, 320)
+    assert init_args["box"] == (130, 90, 60, 60)
+
+    engine.update(FRAME)
+    assert engine.bbox == (300, 200, 120, 120)
+    assert engine.stats()["max_input_width"] == 320
+
+
 # -- off-thread worker (stability: CSRT update() must not run on the UI thread) --
 import time as _time  # noqa: E402
 

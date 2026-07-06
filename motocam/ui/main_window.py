@@ -118,6 +118,7 @@ class MainWindow(QMainWindow):
         self._preview_max_width = preview_cfg.get("max_width", 960)
         self._last_preview_sent_at = 0.0
         ai_cfg = self._config.get("ai", {})
+        tracking_cfg = self._config.get("tracking", {})
         self._ai_suspend_until = 0.0
         self._ai_suspend_reason: str | None = None
         self._ai_guard_inference_ms = float(ai_cfg.get("guard_inference_ms", 180.0))
@@ -125,7 +126,7 @@ class MainWindow(QMainWindow):
         self._ai_guard_util_pct = float(ai_cfg.get("guard_util_pct", 75.0))
         self._ai_guard_cooldown_s = float(ai_cfg.get("guard_cooldown_s", 15.0))
 
-        self.tracker = TrackingEngine()
+        self.tracker = TrackingEngine(max_input_width=int(tracking_cfg.get("max_input_width", 640) or 0))
         self.ai_engine = AiEngine(
             detector=build_detector(self._config),
             target_class=ai_cfg.get("target_class", "cyclist"),
@@ -954,6 +955,7 @@ class MainWindow(QMainWindow):
             f"ai_drop={ai_stats.get('dropped_frames_total', ai_stats.get('dropped_frames', 0))} "
             f"tracker={tracker_stats.get('mode')} tr_last={self._fmt_ms(tracker_stats.get('last_update_ms'))} "
             f"tr_busy={self._fmt_ms(tr_busy)} tr_drop={tracker_stats.get('dropped_frames', 0)} "
+            f"tr_width={tracker_stats.get('max_input_width', 0)} "
             f"preview_last={self._fmt_ms(preview_stats.get('last_render_ms'))} "
             f"preview_busy={self._fmt_ms(pv_busy)} preview_drop={preview_stats.get('dropped_frames', 0)} "
             f"ble_avg={self._fmt_ms(gimbal_stats.get('velocity_write_ms_avg'))} "

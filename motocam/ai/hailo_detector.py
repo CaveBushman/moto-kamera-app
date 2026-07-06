@@ -38,6 +38,7 @@ import numpy as np
 from motocam.ai.ai_engine import Detection, NullDetector
 
 logger = logging.getLogger("motocam.ai.hailo")
+DEV_HEF_MAGIC = b"MOTOCAM_DEV_HEF\n"
 
 # Default label order for a stock COCO-trained YOLOv8/v11 HEF. A
 # custom-trained "cyclist" model overrides this via ai.labels in config.
@@ -224,6 +225,51 @@ class HailoDetector:
             logger.debug("Hailo configured-model exit failed: %s", exc)
 
 
+class DevHefDetector:
+    """Synthetic detector enabled only by a MotoCam dev HEF marker file.
+
+    This is not a Hailo executable and is deliberately labelled `dev_hef`
+    in telemetry. It lets us exercise AI ASSIST / FULL AI / ByteTrack
+    without pretending that a real Hailo-8 model is present.
+    """
+
+    source = "dev_hef"
+
+    def __init__(self, class_name: str = "bicycle"):
+        self.class_name = class_name or "bicycle"
+        self._frame_times: list[float] = []
+        self._start_time = time.monotonic()
+
+    def infer(self, frame: np.ndarray) -> list[Detection]:
+        h, w = frame.shape[:2]
+        now = time.monotonic()
+        self._frame_times.append(now)
+        self._frame_times = [t for t in self._frame_times if t >= now - 2.0]
+        phase = (now - self._start_time) * 0.55
+        box_w = max(40, int(w * 0.10))
+        box_h = max(80, int(h * 0.24))
+        cx = int(w * (0.50 + 0.18 * np.sin(phase)))
+        cy = int(h * (0.55 + 0.05 * np.sin(phase * 0.7)))
+        x = max(0, min(w - box_w, cx - box_w // 2))
+        y = max(0, min(h - box_h, cy - box_h // 2))
+        return [Detection(x=x, y=y, w=box_w, h=box_h, confidence=0.92, class_name=self.class_name)]
+
+    @property
+    def fps(self) -> float:
+        if len(self._frame_times) < 2:
+            return 0.0
+        span = self._frame_times[-1] - self._frame_times[0]
+        return (len(self._frame_times) - 1) / span if span > 0 else 0.0
+
+
+def is_dev_hef(path: str | Path) -> bool:
+    try:
+        with Path(path).open("rb") as fh:
+            return fh.read(len(DEV_HEF_MAGIC)) == DEV_HEF_MAGIC
+    except OSError:
+        return False
+
+
 def resolve_hef_path(hef_path: str, config_dir: str | Path | None = None) -> str:
     path = Path(hef_path).expanduser()
     if path.is_absolute():
@@ -254,6 +300,10 @@ def build_detector(cfg: dict):
             hef_path,
         )
         return NullDetector("null_model")
+    if is_dev_hef(hef_path):
+        class_name = str(ai_cfg.get("target_class") or "bicycle")
+        logger.warning("MotoCam dev HEF active at %s -- synthetic detections only, not a real Hailo model", hef_path)
+        return DevHefDetector(class_name=class_name)
     if not HAILO_AVAILABLE:
         logger.warning("hailo_platform runtime not installed -- using NullDetector "
                        "(install HailoRT on the Ri5 / AI HAT+)")

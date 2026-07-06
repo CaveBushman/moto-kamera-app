@@ -23,6 +23,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO / "config" / "config.yaml"
+DEV_HEF_MAGIC = b"MOTOCAM_DEV_HEF\n"
 
 
 def _load_ai_config() -> dict:
@@ -76,24 +77,36 @@ def check_device() -> bool:
     return False
 
 
-def check_model(ai_cfg: dict) -> bool:
+def check_model(ai_cfg: dict) -> str | None:
     if str(ai_cfg.get("type", "")).lower() != "hailo":
         print(f"  [MISS] config ai.type is '{ai_cfg.get('type')}', not 'hailo' -> detector disabled by config")
-        return False
+        return None
     model = ai_cfg.get("model")
     if not model:
         print("  [MISS] config ai.model is empty -> nothing to load")
-        return False
+        return None
     path = Path(model)
     if not path.is_absolute():
         path = CONFIG_PATH.parent / path
     if path.is_file():
         size_mb = path.stat().st_size / 1e6
-        print(f"  [ok]   model present: {path} ({size_mb:.1f} MB)")
-        return True
+        if _is_dev_hef(path):
+            print(f"  [dev]  MotoCam dev HEF marker present: {path} ({size_mb:.1f} MB)")
+            print("         -> synthetic DEV HEF detector will run; replace with a real Hailo-8 HEF for race use")
+            return "dev"
+        print(f"  [ok]   real model candidate present: {path} ({size_mb:.1f} MB)")
+        return "real"
     print(f"  [MISS] model file not found: {path}")
     print("         -> run scripts/setup_hailo.sh (downloads a stock YOLOv8n HEF)")
-    return False
+    return None
+
+
+def _is_dev_hef(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            return fh.read(len(DEV_HEF_MAGIC)) == DEV_HEF_MAGIC
+    except OSError:
+        return False
 
 
 def main() -> int:
@@ -105,10 +118,14 @@ def main() -> int:
     print("\n2) Device / driver")
     ok_device = check_device()
     print("\n3) Model file")
-    ok_model = check_model(ai_cfg)
+    model_kind = check_model(ai_cfg)
 
     print("\n== verdict ==")
-    if ok_binding and ok_device and ok_model:
+    if model_kind == "dev":
+        print("  DEV HEF active -> AI tracking pipeline can be tested without HailoRT.")
+        print("  This is not real accelerator inference; install HailoRT + real HEF before deployment.")
+        return 0
+    if ok_binding and ok_device and model_kind == "real":
         print("  All three present -> the AI chip should leave NULL and run real inference.")
         return 0
     print("  AI stays NULL until every [MISS] above is resolved.")

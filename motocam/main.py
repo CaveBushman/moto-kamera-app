@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
+import subprocess
+import time
 from pathlib import Path
 
 # Allow running this file directly (`python3 main.py` from inside motocam/)
@@ -26,7 +29,12 @@ from motocam.camera.base import CameraController
 from motocam.camera.mock_camera import MockCameraBackend
 from motocam.camera.bmd_rest_camera import BlackmagicRestCameraBackend
 from motocam.core.config import load_config, resolve_config_path
-from motocam.core.logging_setup import install_control_room_log_forwarder, install_crash_guard, setup_logging
+from motocam.core.logging_setup import (
+    StartupLogBuffer,
+    install_control_room_log_forwarder,
+    install_crash_guard,
+    setup_logging,
+)
 from motocam.gimbal.base import GimbalController
 from motocam.gimbal.factory import build_gimbal_controller
 from motocam.gps.gps_manager import GpsManager
@@ -40,6 +48,77 @@ from motocam.watchdog.ui_watchdog import UiLatencyWatchdog
 
 LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "logo_ccf" / "CSC Logo Horizontal EN RGB.png"
 APP_ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "icons" / "motocam.svg"
+_GIT_REVISION_CACHE: str | None = None
+
+
+def _git_revision() -> str:
+    global _GIT_REVISION_CACHE
+    if _GIT_REVISION_CACHE is not None:
+        return _GIT_REVISION_CACHE
+    root = Path(__file__).resolve().parents[1]
+    try:
+        rev = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1.0,
+        ).strip()
+        dirty = subprocess.run(
+            ["git", "diff", "--quiet"],
+            cwd=root,
+            stderr=subprocess.DEVNULL,
+            timeout=1.0,
+        ).returncode != 0
+        _GIT_REVISION_CACHE = f"{rev}{'-dirty' if dirty else ''}"
+    except Exception:  # noqa: BLE001 -- deployed Pi builds may not include .git
+        _GIT_REVISION_CACHE = "unknown"
+    return _GIT_REVISION_CACHE
+
+
+def _write_startup_state(config_path: Path, phase: str, extra: dict | None = None) -> None:
+    try:
+        log_dir = Path("logs")
+        if config_path:
+            # config/logging.dir may be relative to the process cwd; keep
+            # this independent and colocated with the active config for
+            # boot triage even before normal logging is fully alive.
+            log_dir = config_path.parent.parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime()),
+            "phase": phase,
+            "revision": _git_revision(),
+            "config": str(config_path),
+        }
+        if extra:
+            payload.update(extra)
+        (log_dir / "startup_state.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _log_boot_config(logger: logging.Logger, cfg: dict, config_path: Path) -> None:
+    ai_cfg = cfg.get("ai") or {}
+    gimbal_cfg = cfg.get("gimbal") or {}
+    video_cfg = cfg.get("video") or {}
+    telemetry_cfg = cfg.get("telemetry") or {}
+    startup_cfg = cfg.get("startup") or {}
+    logger.info(
+        "MotoCam build=%s config=%s unit=%s ai=%s ai_delay=%.1fs gimbal=%s/%s video=%s preview=%sfps "
+        "control=%s hardware_delay=%.1fs",
+        _git_revision(),
+        config_path,
+        cfg.get("unit_id", "moto-1"),
+        ai_cfg.get("type", "disabled"),
+        float(ai_cfg.get("startup_delay_s", 0.0) or 0.0),
+        gimbal_cfg.get("type", "unknown"),
+        gimbal_cfg.get("connection", "unknown"),
+        video_cfg.get("device", "unknown"),
+        (cfg.get("preview_relay") or {}).get("fps", "unknown"),
+        telemetry_cfg.get("control_room_url", "unknown"),
+        float(startup_cfg.get("hardware_connect_delay_s", 0.0) or 0.0),
+    )
 
 
 def build_gimbal(cfg: dict) -> GimbalController:
@@ -156,12 +235,25 @@ def main() -> int:
     args = parser.parse_args()
 
     config_path = resolve_config_path(args.config)
+    _write_startup_state(config_path, "config_resolved")
     cfg = load_config(config_path)
     cfg["_config_dir"] = str(config_path.parent)
     setup_logging(cfg.get("logging", {}).get("dir", "logs"))
     logger = logging.getLogger("motocam.main")
     install_crash_guard(logging.getLogger("motocam"))
+    startup_log_buffer = StartupLogBuffer()
+    logging.getLogger("motocam").addHandler(startup_log_buffer)
     logger.info("Starting MotoCam")
+    _log_boot_config(logger, cfg, config_path)
+    _write_startup_state(
+        config_path,
+        "config_loaded",
+        {
+            "unit_id": cfg.get("unit_id", "moto-1"),
+            "ai": (cfg.get("ai") or {}).get("type"),
+            "gimbal": (cfg.get("gimbal") or {}).get("connection"),
+        },
+    )
 
     # Global UI scale: the whole app was sized in logical pixels on a
     # desktop; on the real Pi touchscreen everything reads too small for
@@ -179,14 +271,17 @@ def main() -> int:
     app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
     app.setStyleSheet(DARK_STYLESHEET)
     logger.info("Qt application created")
+    _write_startup_state(config_path, "qt_app_created")
     splash = create_splash()
     splash.show()
     app.processEvents()
     logger.info("Splash screen shown")
+    _write_startup_state(config_path, "splash_shown")
 
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
     logger.info("Qt asyncio event loop installed")
+    _write_startup_state(config_path, "event_loop_installed")
 
     logger.info("Building video backend")
     video_engine = build_video(cfg)
@@ -198,6 +293,7 @@ def main() -> int:
     gps = build_gps(cfg)
     health = HealthMonitor()
     logger.info("Hardware backends created")
+    _write_startup_state(config_path, "backends_created")
 
     telemetry_cfg = cfg.get("telemetry", {})
     link = LinkClient(
@@ -205,7 +301,10 @@ def main() -> int:
         unit_id=cfg.get("unit_id", "moto-1"),
     )
     install_control_room_log_forwarder(logging.getLogger("motocam"), link)
+    startup_log_buffer.replay_to(link)
+    logging.getLogger("motocam").removeHandler(startup_log_buffer)
     logger.info("Control room link created: %s", telemetry_cfg.get("control_room_url", "ws://127.0.0.1:8765"))
+    _write_startup_state(config_path, "link_created")
 
     camera_cfg = cfg.get("camera", {})
     logger.info("Creating main window")
@@ -218,6 +317,7 @@ def main() -> int:
         config_path=config_path,
     )
     logger.info("Main window created")
+    _write_startup_state(config_path, "main_window_created")
     # Fullscreen on the kiosk touchscreen (no title bar / desktop taskbar
     # eating space); windowed on a dev desktop. Config-driven so the Mac
     # stays windowed.
@@ -232,10 +332,12 @@ def main() -> int:
     else:
         window.show()
         logger.info("Main window shown windowed")
+    _write_startup_state(config_path, "main_window_shown", {"fullscreen": fullscreen})
 
     app.processEvents()
     splash.finish(window)
     logger.info("Splash screen finished")
+    _write_startup_state(config_path, "splash_finished")
     QTimer.singleShot(0, window.start_runtime)
 
     # Field canary: warns to the log if anything ever blocks the UI thread
@@ -246,6 +348,7 @@ def main() -> int:
 
     with loop:
         logger.info("Entering Qt event loop")
+        _write_startup_state(config_path, "event_loop_entered")
         loop.run_forever()
 
     return 0

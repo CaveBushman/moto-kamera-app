@@ -24,7 +24,7 @@ logger = logging.getLogger("motocam.network")
 
 RECONNECT_DELAY_S = 3.0
 PING_INTERVAL_S = 5.0
-LOG_QUEUE_MAX = 200
+LOG_QUEUE_MAX = 5000
 
 
 class LinkClient(QObject):
@@ -136,6 +136,8 @@ class LinkClient(QObject):
         if value != self._connected:
             self._connected = value
             self.connected_changed.emit(value)
+        if value:
+            self._start_log_queue_drain()
 
     async def _send(self, envelope: Envelope) -> None:
         if self._ws is None:
@@ -225,8 +227,7 @@ class LinkClient(QObject):
             while len(self._log_queue) >= LOG_QUEUE_MAX:
                 self._log_queue.popleft()
             self._log_queue.append(envelope)
-            if self._log_send_task is None or self._log_send_task.done():
-                self._log_send_task = asyncio.ensure_future(self._drain_log_queue())
+            self._start_log_queue_drain()
 
         try:
             running_loop = asyncio.get_running_loop()
@@ -239,11 +240,18 @@ class LinkClient(QObject):
             return
         schedule()
 
+    def _start_log_queue_drain(self) -> None:
+        if not self._connected or self._ws is None:
+            return
+        if self._log_send_task is None or self._log_send_task.done():
+            self._log_send_task = asyncio.ensure_future(self._drain_log_queue())
+
     async def _drain_log_queue(self) -> None:
-        while self._log_queue:
-            envelope = self._log_queue.popleft()
+        while self._log_queue and self._ws is not None and self._connected:
+            envelope = self._log_queue[0]
             try:
-                await self._send(envelope)
+                await self._ws.send(envelope.to_json())
+                self._log_queue.popleft()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("log send failed: %s", exc)
                 return

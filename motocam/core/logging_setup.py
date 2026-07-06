@@ -61,6 +61,26 @@ class ControlRoomLogHandler(logging.Handler):
             self.handleError(record)
 
 
+class StartupLogBuffer(logging.Handler):
+    def __init__(self, level: int = logging.NOTSET):
+        super().__init__(level)
+        self.records: list[tuple[str, str, str]] = []
+        self._exception_formatter = logging.Formatter()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+            if record.exc_info:
+                message = f"{message}\n{self._exception_formatter.formatException(record.exc_info)}"
+            self.records.append((record.levelname, message, record.name))
+        except Exception:
+            self.handleError(record)
+
+    def replay_to(self, link: Any) -> None:
+        for level, message, module in self.records:
+            link.send_log_event(level, message, module)
+
+
 def install_control_room_log_forwarder(logger: logging.Logger, link: Any) -> ControlRoomLogHandler:
     for handler in logger.handlers:
         if isinstance(handler, ControlRoomLogHandler):

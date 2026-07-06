@@ -130,6 +130,8 @@ class MainWindow(QMainWindow):
         self._gimbal_connect_task: asyncio.Task | None = None
         self._gimbal_velocity_task: asyncio.Task | None = None
         self._pending_gimbal_velocity: tuple[bool, float, float] | None = None
+        self._manual_pan_v = 0.0
+        self._manual_tilt_v = 0.0
         self._zoom_task: asyncio.Task | None = None
         self._pending_zoom_speed: float | None = None
 
@@ -371,6 +373,8 @@ class MainWindow(QMainWindow):
                 task.cancel()
             setattr(self, attr_name, None)
         self._pending_gimbal_velocity = None
+        self._manual_pan_v = 0.0
+        self._manual_tilt_v = 0.0
         self._pending_zoom_speed = None
 
     def _start_timers(self) -> None:
@@ -521,12 +525,20 @@ class MainWindow(QMainWindow):
     # -- Manual pan/tilt drag (design doc 7.2 Manual, 12.1 joystick) ---------
     def _on_manual_drag(self, dx_norm: float, dy_norm: float) -> None:
         if self.gimbal.mode != OperatingMode.MANUAL:
+            self._manual_pan_v = 0.0
+            self._manual_tilt_v = 0.0
             return
-        pan_v = dx_norm * self.gimbal.max_pan_speed
-        tilt_v = -dy_norm * self.gimbal.max_tilt_speed
-        self._request_gimbal_velocity(True, pan_v, tilt_v)
+        # Do not send from every mouse/touch move. Qt can emit these far
+        # faster than the RS4 BLE joystick stream used by the Ronin app
+        # (~15-20 Hz), which overloads BlueZ/D-Bus and shows up as seconds
+        # of delayed motion. Keep only the latest desired velocity; the
+        # 20 Hz control timer below is the sole sender.
+        self._manual_pan_v = dx_norm * self.gimbal.max_pan_speed
+        self._manual_tilt_v = -dy_norm * self.gimbal.max_tilt_speed
 
     def _on_manual_drag_end(self) -> None:
+        self._manual_pan_v = 0.0
+        self._manual_tilt_v = 0.0
         self._request_gimbal_velocity(True, 0.0, 0.0)
 
     def _on_zoom_drag(self, zoom_speed: float) -> None:
@@ -638,8 +650,7 @@ class MainWindow(QMainWindow):
             # re-send every tick (not just on touch-move) so holding the
             # knob at an offset keeps panning/tilting instead of stopping
             # the instant the finger stops moving.
-            dx_norm, dy_norm = self.preview.joystick.offset
-            self._on_manual_drag(dx_norm, dy_norm)
+            self._request_gimbal_velocity(True, self._manual_pan_v, self._manual_tilt_v)
         if self.preview.zoom_rocker.is_dragging:
             self._on_zoom_drag(self.preview.zoom_rocker.offset)
 

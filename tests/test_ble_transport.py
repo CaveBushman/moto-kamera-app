@@ -159,6 +159,16 @@ def test_on_notify_enqueues_bytes():
     assert transport._queue.get_nowait() == b"\x55\x12\x04"
 
 
+def test_on_notify_drops_oldest_when_queue_is_full():
+    transport = BleTransport(address="x")
+    transport._queue = asyncio.Queue(maxsize=2)
+    transport._on_notify(None, b"\x01")
+    transport._on_notify(None, b"\x02")
+    transport._on_notify(None, b"\x03")
+    assert transport._queue.get_nowait() == b"\x02"
+    assert transport._queue.get_nowait() == b"\x03"
+
+
 def test_drain_returns_all_queued_and_empties():
     transport = BleTransport(address="x")
     transport._queue = asyncio.Queue()

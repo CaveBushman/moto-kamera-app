@@ -58,6 +58,20 @@ CAN_RECV_ID = 0x222  # verified against the reference implementation
 CAN_BITRATE = 1_000_000
 RECONNECT_MIN_INTERVAL_S = 5.0
 REPLY_TIMEOUT_S = 0.8
+# Bounds a single joystick write's wait. Comfortably above every write_ms
+# we've measured on the Pi so far (worst logged max: 1122ms) so it never
+# fires on ordinary slow-BLE-write conditions, but well under the ~3s
+# freeze reported live: without this, set_velocity() awaits
+# write_gatt_char() with no deadline, so one stalled GATT write blocks
+# the *entire* joystick pipeline (nothing else is sent, and the
+# coalescing in main_window.py discards -- doesn't queue -- whatever the
+# operator did meanwhile) until that single write finally returns.
+# Timing out cancels the awaited coroutine, which should abort the
+# underlying D-Bus call rather than leaving it to complete in the
+# background, so the very next tick's coalesced (freshest) command can
+# go out immediately instead of waiting behind a stuck one.
+VELOCITY_SEND_TIMEOUT_S = 1.5
+BLE_NOTIFY_QUEUE_MAX = 256
 
 try:
     import can  # python-can, optional: only needed on the Pi with a CAN adapter
@@ -320,7 +334,7 @@ class BleTransport:
             tx_char_uuid=self.tx_char_uuid,
             rx_char_uuid=self.rx_char_uuid,
         )
-        self._queue = asyncio.Queue()
+        self._queue = asyncio.Queue(maxsize=BLE_NOTIFY_QUEUE_MAX)
         await self._client.start_notify(self._endpoint.rx_uuid, self._on_notify)
         logger.info(
             "DJI RS 4 Pro BLE connected, write=%s notify=%s response=%s mtu_payload=%d",
@@ -450,7 +464,14 @@ class BleTransport:
 
     def _on_notify(self, _sender, data: bytearray | bytes) -> None:
         if self._queue is not None:
-            self._queue.put_nowait(bytes(data))
+            try:
+                self._queue.put_nowait(bytes(data))
+            except asyncio.QueueFull:
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                self._queue.put_nowait(bytes(data))
 
     @classmethod
     def _select_characteristics(
@@ -711,7 +732,18 @@ class DjiRs4ProBackend(GimbalBackend):
             self._last_velocity_call_at = now
             send_start = now
             try:
-                await self._call_transport("send", frame)
+                await asyncio.wait_for(
+                    self._call_transport("send", frame), timeout=VELOCITY_SEND_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "BLE joystick write stalled past %.1fs, abandoning -- next tick's "
+                    "freshest command will be sent instead of waiting behind it",
+                    VELOCITY_SEND_TIMEOUT_S,
+                )
+                self._velocity_send_durations_ms.append((time.monotonic() - send_start) * 1000.0)
+                self._log_velocity_timing_stats(now)
+                return
             except Exception as exc:  # noqa: BLE001
                 logger.warning("BLE joystick send failed (%s), marking disconnected", exc)
                 self._connected = False

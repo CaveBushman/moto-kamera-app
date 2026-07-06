@@ -75,7 +75,14 @@ def _scale_detections(detections: list, scale_to_source: float, frame_shape: tup
 class AiWorker(QThread):
     detections_ready = pyqtSignal(object)  # list[Detection]
 
-    def __init__(self, ai_engine: AiEngine, max_fps: float = 0.0, max_input_width: int = 960, parent=None):
+    def __init__(
+        self,
+        ai_engine: AiEngine,
+        max_fps: float = 0.0,
+        max_input_width: int = 960,
+        performance_budget_pct: float = 35.0,
+        parent=None,
+    ):
         super().__init__(parent)
         self._engine = ai_engine
         self._lock = threading.Lock()
@@ -93,6 +100,8 @@ class AiWorker(QThread):
         self._completed_frames = 0
         self._failed_frames = 0
         self._last_inference_ms: float | None = None
+        self._busy_started_at: float | None = None
+        self._performance_budget_pct = max(5.0, min(100.0, float(performance_budget_pct or 35.0)))
         self._busy_samples: list[tuple[float, float]] = []  # (end_monotonic, duration_s)
         self.set_max_fps(max_fps)
 
@@ -107,7 +116,8 @@ class AiWorker(QThread):
         now = time.monotonic()
         with self._lock:
             self._submitted_frames += 1
-            if self._min_submit_interval_s > 0 and now - self._last_accept_at < self._min_submit_interval_s:
+            min_interval_s = self._effective_min_submit_interval_locked()
+            if min_interval_s > 0 and now - self._last_accept_at < min_interval_s:
                 self._record_drop_locked(now)
                 return False
             if self._latest is not None:
@@ -138,6 +148,8 @@ class AiWorker(QThread):
             frame = item
             start = time.monotonic()
             failed = False
+            with self._lock:
+                self._busy_started_at = start
             try:
                 inference_frame, scale_to_source = _resize_for_inference(frame, self._max_input_width)
                 detections = self._engine.process(inference_frame)
@@ -170,6 +182,15 @@ class AiWorker(QThread):
         with self._lock:
             return self._max_input_width
 
+    def set_performance_budget_pct(self, budget_pct: float) -> None:
+        with self._lock:
+            self._performance_budget_pct = max(5.0, min(100.0, float(budget_pct or 35.0)))
+
+    @property
+    def performance_budget_pct(self) -> float:
+        with self._lock:
+            return self._performance_budget_pct
+
     def stats(self) -> dict[str, float | int | None]:
         now = time.monotonic()
         with self._lock:
@@ -177,8 +198,11 @@ class AiWorker(QThread):
             self._trim_drop_samples(now)
             busy_s = sum(duration for _, duration in self._busy_samples)
             util = min(100.0, (busy_s / UTIL_WINDOW_S) * 100.0)
+            effective_min_interval = self._effective_min_submit_interval_locked()
+            current_busy_ms = ((now - self._busy_started_at) * 1000.0) if self._busy_started_at is not None else None
             return {
                 "max_fps": self._max_fps,
+                "effective_max_fps": (1.0 / effective_min_interval) if effective_min_interval > 0 else 0.0,
                 "submitted_frames": self._submitted_frames,
                 "accepted_frames": self._accepted_frames,
                 "dropped_frames": len(self._drop_samples),
@@ -186,9 +210,28 @@ class AiWorker(QThread):
                 "completed_frames": self._completed_frames,
                 "failed_frames": self._failed_frames,
                 "last_inference_ms": self._last_inference_ms,
+                "current_busy_ms": current_busy_ms,
                 "worker_util_pct": util,
                 "max_input_width": self._max_input_width,
+                "performance_budget_pct": self._performance_budget_pct,
             }
+
+    def _effective_min_submit_interval_locked(self) -> float:
+        """Static max_fps plus an adaptive CPU budget.
+
+        Hailo accelerates the neural net, but the Pi CPU still pays for
+        frame handoff, resize/letterbox and post-processing. If a real
+        inference takes e.g. 80 ms and the budget is 35%, accepting frames
+        faster than about 4.3 fps just builds heat and UI jitter. Latest
+        frame wins, so dropping over-budget frames is the right realtime
+        behaviour.
+        """
+        min_interval = self._min_submit_interval_s
+        if self._last_inference_ms is None or self._last_inference_ms <= 0:
+            return min_interval
+        budget_ratio = self._performance_budget_pct / 100.0
+        adaptive_interval = (self._last_inference_ms / 1000.0) / budget_ratio
+        return max(min_interval, adaptive_interval)
 
     def _record_inference(self, duration_s: float, failed: bool) -> None:
         now = time.monotonic()
@@ -197,6 +240,7 @@ class AiWorker(QThread):
             self._busy_samples.append((now, duration_s))
             self._trim_busy_samples(now)
             self._completed_frames += 1
+            self._busy_started_at = None
             if failed:
                 self._failed_frames += 1
 

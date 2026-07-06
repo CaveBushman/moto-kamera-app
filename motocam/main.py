@@ -186,7 +186,7 @@ def main() -> int:
         video_engine, gimbal, camera, gps, link, health,
         unit_id=cfg.get("unit_id", "moto-1"),
         camera_ip=camera_cfg.get("ip", "192.168.9.20"),
-        camera_port=camera_cfg.get("port", 9993),
+        camera_port=camera_cfg.get("rest_port", 80),
         config=cfg,
         config_path=config_path,
     )

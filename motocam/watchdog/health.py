@@ -7,7 +7,9 @@ to None fields on platforms where the sysfs thermal path doesn't exist
 """
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -31,24 +33,78 @@ class HealthMonitor:
         self._sample_interval_s = max(0.0, float(sample_interval_s))
         self._last_sample_at = 0.0
         self._last_sample: SystemTelemetry | None = None
+        self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="motocam-health")
+        self._sample_future: Future | None = None
 
     def set_video_fps(self, fps: float) -> None:
         self._video_fps = fps
-        if self._last_sample is not None:
-            self._last_sample.video_fps = fps
+        with self._lock:
+            if self._last_sample is not None:
+                self._last_sample.video_fps = fps
 
     def sample(self) -> SystemTelemetry:
+        """Blocking sample for tests and non-UI callers.
+
+        The main window uses latest() so psutil/sysfs calls can never block
+        the Qt event loop.
+        """
         now = time.monotonic()
-        if self._last_sample is not None and now - self._last_sample_at < self._sample_interval_s:
+        with self._lock:
+            if self._last_sample is not None and now - self._last_sample_at < self._sample_interval_s:
+                return self._last_sample
+        sample = self._collect_sample()
+        with self._lock:
+            self._last_sample = sample
+            self._last_sample_at = now
             return self._last_sample
-        self._last_sample = SystemTelemetry(
+
+    def latest(self) -> SystemTelemetry:
+        """Return cached stats immediately and refresh them in the background.
+
+        This is the UI-safe path. On macOS psutil can occasionally block or
+        raise from kernel struct mismatches; on the Ri field unit sysfs/psutil
+        are normally quick, but they still should not run from a 500 ms Qt
+        telemetry timer.
+        """
+        now = time.monotonic()
+        with self._lock:
+            if self._last_sample is None:
+                self._last_sample = SystemTelemetry(video_fps=self._video_fps)
+                self._last_sample_at = 0.0
+            cached = self._last_sample
+            due = now - self._last_sample_at >= self._sample_interval_s
+            running = self._sample_future is not None and not self._sample_future.done()
+            if due and not running:
+                self._sample_future = self._executor.submit(self._collect_sample)
+                self._sample_future.add_done_callback(self._on_sample_done)
+        return cached
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def _collect_sample(self) -> SystemTelemetry:
+        return SystemTelemetry(
             cpu_temp_c=self._read_cpu_temp(),
             cpu_load_pct=self._safe_psutil(lambda: psutil.cpu_percent(interval=None)),
             ram_used_pct=self._safe_psutil(lambda: psutil.virtual_memory().percent),
             video_fps=self._video_fps,
         )
-        self._last_sample_at = now
-        return self._last_sample
+
+    def _on_sample_done(self, future: Future) -> None:
+        try:
+            sample = future.result()
+        except Exception as exc:  # noqa: BLE001 -- background health must never take down UI
+            logger.warning("health sample failed (%s)", exc)
+            with self._lock:
+                if self._sample_future is future:
+                    self._sample_future = None
+            return
+        with self._lock:
+            self._last_sample = sample
+            self._last_sample_at = time.monotonic()
+            if self._sample_future is future:
+                self._sample_future = None
 
     @staticmethod
     def _safe_psutil(fn) -> float | None:

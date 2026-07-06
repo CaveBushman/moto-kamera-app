@@ -26,6 +26,33 @@ def test_link_client_start_accepts_configured_loop_before_it_is_running():
         asyncio.set_event_loop(previous_loop)
 
 
+def test_link_client_rejects_invalid_control_room_urls():
+    client = LinkClient("http://127.0.0.1:8765", "moto-1")
+
+    try:
+        client._validate_url()
+    except ValueError as exc:
+        assert "scheme" in str(exc)
+    else:
+        raise AssertionError("invalid scheme accepted")
+
+    client.url = "ws://:8765"
+    try:
+        client._validate_url()
+    except ValueError as exc:
+        assert "host is empty" in str(exc)
+    else:
+        raise AssertionError("empty host accepted")
+
+    client.url = "ws://127.0.0.1"
+    try:
+        client._validate_url()
+    except ValueError as exc:
+        assert "port is missing" in str(exc)
+    else:
+        raise AssertionError("missing port accepted")
+
+
 def test_preview_send_keeps_only_latest_frame_under_backpressure():
     asyncio.run(_preview_backpressure_case())
 

@@ -58,6 +58,18 @@ def test_settings_dialog_emits_ble_joystick_timeout():
     assert emitted[-1]["ble_notify_stale_s"] == 4.5
 
 
+def test_settings_dialog_emits_ai_performance_budget():
+    app = _app()
+    dialog = SettingsDialog()
+    emitted: list[float] = []
+    dialog.ai_performance_budget_changed.connect(emitted.append)
+
+    dialog.set_tracking_values("bicycle", 0.35, 30, 25, 20.0, 12.0, 8.0, 640, 30.0)
+    dialog.ai_budget_spin.setValue(45.0)
+
+    assert emitted[-1] == 45.0
+
+
 def test_settings_dialog_uses_full_screen_scroll_layout():
     app = _app()
     dialog = SettingsDialog()

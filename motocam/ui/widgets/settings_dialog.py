@@ -58,7 +58,7 @@ GPS_BAUDRATES = [
     ("115200", 115200),
 ]
 DEFAULT_CONTROL_ROOM_PORT = 8765
-DEFAULT_CAMERA_REST_PORT = 9993
+DEFAULT_CAMERA_REST_PORT = 80
 
 
 class DeviceScanWorker(QThread):
@@ -105,6 +105,7 @@ class SettingsDialog(QDialog):
     max_speed_changed = pyqtSignal(float, float)
     ai_max_fps_changed = pyqtSignal(float)
     ai_max_input_width_changed = pyqtSignal(int)
+    ai_performance_budget_changed = pyqtSignal(float)
 
     connection_apply_requested = pyqtSignal(str, str)  # (unit_id, control_room_url)
     camera_apply_requested = pyqtSignal(str, int)  # (ip, port)
@@ -787,6 +788,13 @@ class SettingsDialog(QDialog):
         self.ai_input_width_spin.valueChanged.connect(self.ai_max_input_width_changed.emit)
         form.addRow("AI input width", self.ai_input_width_spin)
 
+        self.ai_budget_spin = QDoubleSpinBox()
+        self.ai_budget_spin.setRange(5.0, 100.0)
+        self.ai_budget_spin.setSingleStep(5.0)
+        self.ai_budget_spin.setSuffix(" %")
+        self.ai_budget_spin.valueChanged.connect(self.ai_performance_budget_changed.emit)
+        form.addRow("AI CPU budget", self.ai_budget_spin)
+
         self.dead_zone_x_spin = QSpinBox()
         self.dead_zone_x_spin.setRange(0, 200)
         self.dead_zone_x_spin.setSuffix(" px")
@@ -819,12 +827,14 @@ class SettingsDialog(QDialog):
         max_pan_speed: float, max_tilt_speed: float,
         ai_max_fps: float,
         ai_max_input_width: int,
+        ai_performance_budget_pct: float,
     ) -> None:
         self._select(self.target_class_combo, target_class)
         for spin, value in (
             (self.confidence_spin, confidence),
             (self.ai_max_fps_spin, ai_max_fps),
             (self.ai_input_width_spin, ai_max_input_width),
+            (self.ai_budget_spin, ai_performance_budget_pct),
             (self.dead_zone_x_spin, dead_zone_x),
             (self.dead_zone_y_spin, dead_zone_y),
             (self.max_pan_speed_spin, max_pan_speed),

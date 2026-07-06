@@ -12,6 +12,7 @@ import base64
 from collections import deque
 import logging
 import time
+from urllib.parse import urlparse
 
 import websockets
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -85,18 +86,32 @@ class LinkClient(QObject):
     async def _run_forever(self) -> None:
         while True:
             try:
+                self._validate_url()
                 async with websockets.connect(self.url, ping_interval=20, ping_timeout=20) as ws:
                     self._ws = ws
                     self._set_connected(True)
                     logger.info("Connected to control room at %s", self.url)
                     await self._send(make_envelope(MessageType.HELLO, {"name": self.unit_id}, self.unit_id))
                     await self._receive_loop(ws)
-            except (OSError, ConnectionClosed) as exc:
+            except (ValueError, OSError, ConnectionClosed) as exc:
                 logger.warning("Control room link unavailable (%s), retrying in %.0fs", exc, RECONNECT_DELAY_S)
             finally:
                 self._ws = None
                 self._set_connected(False)
             await asyncio.sleep(RECONNECT_DELAY_S)
+
+    def _validate_url(self) -> None:
+        parsed = urlparse(self.url)
+        if parsed.scheme not in {"ws", "wss"}:
+            raise ValueError(f"invalid control-room URL scheme: {self.url!r}")
+        if not parsed.hostname:
+            raise ValueError(f"control-room host is empty: {self.url!r}")
+        try:
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError(f"invalid control-room port: {self.url!r}") from exc
+        if port is None:
+            raise ValueError(f"control-room port is missing: {self.url!r}")
 
     async def _receive_loop(self, ws) -> None:
         async for raw in ws:

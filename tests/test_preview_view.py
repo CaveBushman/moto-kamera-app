@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import time
 
 from motocam.ui.widgets import preview_view as preview_view_module
 
@@ -17,6 +18,7 @@ def _frame(w: int, h: int) -> np.ndarray:
 def test_update_frame_without_bbox_sets_pixmap(preview):
     preview.set_bbox(None, "idle")
     preview.update_frame(_frame(1920, 1080))
+    _spin_until(lambda: preview._image_label.pixmap() is not None and not preview._image_label.pixmap().isNull())
     pm = preview._image_label.pixmap()
     assert pm is not None and not pm.isNull()
     assert pm.width() <= preview._image_label.width()
@@ -25,9 +27,10 @@ def test_update_frame_without_bbox_sets_pixmap(preview):
 def test_update_frame_with_bbox_does_not_crash(preview):
     preview.set_bbox((760, 420, 400, 300), "locked")
     preview.update_frame(_frame(1920, 1080))
+    _spin_until(lambda: preview._image_label.pixmap() is not None and not preview._image_label.pixmap().isNull())
     assert not preview._image_label.pixmap().isNull()
-    # the clean full-res pixmap is retained for rescaling (no baked-in box)
-    assert preview._last_pixmap.width() == 1920
+    assert preview._last_frame.shape[1] == 1920
+    assert preview._last_image is not None
 
 
 def test_render_survives_resize_and_reuses_last_frame(preview):
@@ -35,13 +38,14 @@ def test_render_survives_resize_and_reuses_last_frame(preview):
     preview.update_frame(_frame(640, 480))
     preview.resize(800, 600)
     preview._render_scaled()
+    _spin_until(lambda: preview._image_label.pixmap() is not None and not preview._image_label.pixmap().isNull())
     assert not preview._image_label.pixmap().isNull()
 
 
 def test_render_scaled_noop_before_first_frame(preview_no_frame):
     # Must not raise when there is no pixmap yet (e.g. an early resize).
     preview_no_frame._render_scaled()
-    assert preview_no_frame._last_pixmap is None
+    assert preview_no_frame._last_image is None
 
 
 def test_update_frame_throttles_expensive_qt_render(preview, monkeypatch):
@@ -71,14 +75,31 @@ def preview(qapp):
     pv.resize(1280, 720)
     pv.show()
     qapp.processEvents()
-    return pv
+    yield pv
+    pv.stop_renderer()
 
 
 @pytest.fixture
 def preview_no_frame(qapp):
     from motocam.ui.widgets.preview_view import PreviewView
 
-    return PreviewView()
+    pv = PreviewView()
+    yield pv
+    pv.stop_renderer()
+
+
+def _spin_until(predicate, timeout_s: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        from PyQt6.QtWidgets import QApplication
+
+        QApplication.processEvents()
+        if predicate():
+            return
+        time.sleep(0.01)
+    from PyQt6.QtWidgets import QApplication
+
+    QApplication.processEvents()
 
 
 @pytest.fixture(scope="module")

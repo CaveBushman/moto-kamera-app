@@ -117,9 +117,15 @@ class MainWindow(QMainWindow):
         self._preview_jpeg_quality = preview_jpeg_quality(preview_cfg.get("jpeg_quality", 55))
         self._preview_max_width = preview_cfg.get("max_width", 960)
         self._last_preview_sent_at = 0.0
+        ai_cfg = self._config.get("ai", {})
+        self._ai_suspend_until = 0.0
+        self._ai_suspend_reason: str | None = None
+        self._ai_guard_inference_ms = float(ai_cfg.get("guard_inference_ms", 180.0))
+        self._ai_guard_busy_ms = float(ai_cfg.get("guard_busy_ms", 500.0))
+        self._ai_guard_util_pct = float(ai_cfg.get("guard_util_pct", 75.0))
+        self._ai_guard_cooldown_s = float(ai_cfg.get("guard_cooldown_s", 15.0))
 
         self.tracker = TrackingEngine()
-        ai_cfg = self._config.get("ai", {})
         self.ai_engine = AiEngine(
             detector=build_detector(self._config),
             target_class=ai_cfg.get("target_class", "cyclist"),
@@ -133,6 +139,7 @@ class MainWindow(QMainWindow):
             self.ai_engine,
             max_fps=float(ai_cfg.get("max_fps", 12.0)),
             max_input_width=int(ai_cfg.get("max_input_width", 960) or 0),
+            performance_budget_pct=float(ai_cfg.get("performance_budget_pct", 35.0)),
         )
         self._latest_detections: list = []
         self.pid = GimbalPid(
@@ -267,6 +274,7 @@ class MainWindow(QMainWindow):
             self.pid.pan.max_speed, self.pid.tilt.max_speed,
             self.ai_worker.max_fps,
             self.ai_worker.max_input_width,
+            self.ai_worker.performance_budget_pct,
         )
         self._settings.set_safety_values(self._ride_lock_enabled, self._ride_lock_speed_kmh)
         self._settings.exec()
@@ -315,6 +323,7 @@ class MainWindow(QMainWindow):
         self._settings.max_speed_changed.connect(self._on_max_speed_changed)
         self._settings.ai_max_fps_changed.connect(self._on_ai_max_fps_changed)
         self._settings.ai_max_input_width_changed.connect(self._on_ai_max_input_width_changed)
+        self._settings.ai_performance_budget_changed.connect(self._on_ai_performance_budget_changed)
 
         self._settings.connection_apply_requested.connect(self._on_connection_apply)
         self._settings.camera_apply_requested.connect(self._on_camera_address_apply)
@@ -493,7 +502,7 @@ class MainWindow(QMainWindow):
         # act on the most recent detections the worker has produced. Seeding
         # CSRT with the current frame and a slightly older detection box is
         # fine -- the box is still approximately valid.
-        if self.ai_engine.enabled:
+        if self._ai_should_submit():
             self.ai_worker.submit(frame)
         else:
             self._latest_detections = []
@@ -515,7 +524,9 @@ class MainWindow(QMainWindow):
         self.preview.set_bbox(self.tracker.bbox, self.tracker.state.value)
         self.preview.update_frame(frame)
 
-        if is_fallback_source(self.ai_engine.source):
+        if self._ai_guard_paused():
+            self.top_bar.ai_chip.set_state("warn", "AI PAUSED")
+        elif is_fallback_source(self.ai_engine.source):
             self.top_bar.ai_chip.set_state("warn", f"AI {source_value_display(self.ai_engine.source)}")
         else:
             chip_state = STATE_TO_CHIP.get(self.tracker.state.value, "idle")
@@ -531,10 +542,54 @@ class MainWindow(QMainWindow):
 
     def _on_detections(self, detections: list) -> None:
         """Latest detections from the off-thread AI worker (queued signal)."""
+        if self._ai_guard_paused():
+            return
         self._latest_detections = detections
         # Drive the peloton tracker (ByteTrack) and refresh a locked rider's
         # box -- keeps a specific rider through occlusion in a bunch.
         self.tracker.update_detections(detections)
+
+    def _ai_should_submit(self) -> bool:
+        return (
+            self.ai_engine.enabled
+            and not is_fallback_source(self.ai_engine.source)
+            and not self._ai_guard_paused()
+        )
+
+    def _ai_guard_paused(self) -> bool:
+        if time.monotonic() < self._ai_suspend_until:
+            return True
+        if self._ai_suspend_until > 0:
+            logger.info("AI guard cooldown ended; inference may resume")
+            self._ai_suspend_until = 0.0
+            self._ai_suspend_reason = None
+        return False
+
+    def _pause_ai_guard(self, reason: str) -> None:
+        now = time.monotonic()
+        if now < self._ai_suspend_until:
+            return
+        self._ai_suspend_until = now + self._ai_guard_cooldown_s
+        self._ai_suspend_reason = reason
+        self._latest_detections = []
+        logger.warning("AI guard paused Hailo inference for %.0fs: %s", self._ai_guard_cooldown_s, reason)
+
+    def _check_ai_guard(self, ai_stats: dict) -> None:
+        if not self.ai_engine.enabled or is_fallback_source(self.ai_engine.source):
+            return
+        last_ms = ai_stats.get("last_inference_ms")
+        if last_ms is not None and float(last_ms) > self._ai_guard_inference_ms:
+            self._pause_ai_guard(f"last inference {float(last_ms):.0f} ms > {self._ai_guard_inference_ms:.0f} ms")
+            return
+        current_busy_ms = ai_stats.get("current_busy_ms")
+        if current_busy_ms is not None and float(current_busy_ms) > self._ai_guard_busy_ms:
+            self._pause_ai_guard(
+                f"inference still busy {float(current_busy_ms):.0f} ms > {self._ai_guard_busy_ms:.0f} ms"
+            )
+            return
+        util = ai_stats.get("worker_util_pct")
+        if util is not None and float(util) > self._ai_guard_util_pct:
+            self._pause_ai_guard(f"AI worker util {float(util):.0f}% > {self._ai_guard_util_pct:.0f}%")
 
     def _on_preview_encoded(self, jpeg_bytes: bytes, width: int, height: int, byte_count: int) -> None:
         if not self._preview_streaming:
@@ -639,6 +694,8 @@ class MainWindow(QMainWindow):
     def _on_mode_selected(self, mode: OperatingMode) -> None:
         self.gimbal.mode = mode
         self.ai_engine.enabled = mode in (OperatingMode.AI_ASSIST, OperatingMode.FULL_AI)
+        if self.ai_engine.enabled and self._ai_guard_paused():
+            logger.warning("AI mode selected while Hailo guard is cooling down: %s", self._ai_suspend_reason)
         asyncio.ensure_future(self.gimbal.set_mode(mode))
         if mode in (OperatingMode.LOCK, OperatingMode.HOME, OperatingMode.MANUAL):
             self.tracker.clear()
@@ -767,7 +824,7 @@ class MainWindow(QMainWindow):
         await self.gimbal.refresh_orientation()
 
     def _telemetry_tick(self) -> None:
-        sys_stats = self.health.sample()
+        sys_stats = self.health.latest()
         # 500ms window -> bytes * 8 bits/byte / 1000 (kb) / 0.5s
         if self._preview_streaming:
             self._preview_bitrate_kbps = self._preview_bytes_accum * 16 / 1000
@@ -775,6 +832,7 @@ class MainWindow(QMainWindow):
             self._preview_bitrate_kbps = None
         self._preview_bytes_accum = 0
         ai_stats = self.ai_worker.stats()
+        self._check_ai_guard(ai_stats)
         gimbal_stats = self.gimbal.velocity_stats()
         telemetry = Telemetry(
             gps=self.gps.state,
@@ -891,6 +949,11 @@ class MainWindow(QMainWindow):
     def _on_ai_max_input_width_changed(self, max_input_width: int) -> None:
         self.ai_worker.set_max_input_width(max_input_width)
         self._config.setdefault("ai", {})["max_input_width"] = max_input_width
+        self._save_config()
+
+    def _on_ai_performance_budget_changed(self, budget_pct: float) -> None:
+        self.ai_worker.set_performance_budget_pct(budget_pct)
+        self._config.setdefault("ai", {})["performance_budget_pct"] = budget_pct
         self._save_config()
 
     def _on_connection_apply(self, unit_id: str, control_room_url: str) -> None:
@@ -1086,6 +1149,14 @@ class MainWindow(QMainWindow):
             self._preview_encoder.stop()
         except Exception as exc:  # noqa: BLE001
             logger.debug("preview encoder stop failed: %s", exc)
+        try:
+            self.preview.stop_renderer()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("preview renderer stop failed: %s", exc)
+        try:
+            self.health.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("health monitor stop failed: %s", exc)
         try:
             self.tracker.stop()
         except Exception as exc:  # noqa: BLE001

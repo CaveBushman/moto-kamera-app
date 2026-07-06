@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from motocam.ai.ai_engine import AiEngine, Detection
+from motocam.ai import ai_worker as ai_worker_module
 from motocam.ai.ai_worker import AiWorker
 
 
@@ -122,6 +123,29 @@ def test_worker_downscales_inference_frame_and_remaps_detections(qapp):
     assert det.x == 18
     assert det.w == 20
     assert worker.stats()["max_input_width"] == 40
+
+
+def test_worker_adapts_submit_rate_to_inference_budget():
+    engine = AiEngine(detector=_CountingDetector())
+    worker = AiWorker(engine, max_fps=30.0, performance_budget_pct=25.0)
+
+    worker._last_inference_ms = 100.0
+
+    assert worker.submit(_frame(1)) is True
+    assert worker.submit(_frame(2)) is False
+    stats = worker.stats()
+    assert stats["performance_budget_pct"] == 25.0
+    assert stats["effective_max_fps"] == pytest.approx(2.5)
+
+
+def test_worker_reports_current_busy_inference(monkeypatch):
+    engine = AiEngine(detector=_CountingDetector())
+    worker = AiWorker(engine)
+    monkeypatch.setattr(ai_worker_module.time, "monotonic", lambda: 20.5)
+
+    worker._busy_started_at = 20.0
+
+    assert worker.stats()["current_busy_ms"] == pytest.approx(500.0)
 
 
 def test_inference_exception_is_swallowed(qapp):

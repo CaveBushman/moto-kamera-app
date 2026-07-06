@@ -6,10 +6,11 @@ control lives without hunting for it."""
 from __future__ import annotations
 
 import time
+import threading
 
 import numpy as np
-from PyQt6.QtCore import QPoint, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QPoint, QSize, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QImage, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from motocam.ui.widgets.exposure_rocker import ExposureRocker
@@ -28,6 +29,126 @@ CONTROL_HUD_GAP = 16
 # CONTROL_HUD_GAP -- the floor the HUD is never allowed to shrink below.
 MIN_CONTROL_ZONE = 200
 DEFAULT_MAX_RENDER_FPS = 20.0
+
+
+class PreviewRenderWorker(QThread):
+    """Scale preview frames and draw bbox overlays off the Qt UI thread.
+
+    QPixmap must stay on the GUI thread, but QImage + cv2/numpy resize work
+    can run safely in a worker. The worker keeps only the newest submitted
+    frame, so slow rendering drops stale frames instead of queueing latency.
+    """
+
+    image_ready = pyqtSignal(object, int, int)  # QImage, frame_w, frame_h
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._running = True
+        self._latest: tuple[np.ndarray, QSize, tuple[int, int, int, int] | None, str, bool] | None = None
+
+    def submit(
+        self,
+        frame: np.ndarray,
+        label_size: QSize,
+        bbox: tuple[int, int, int, int] | None,
+        target_state: str,
+        smooth_scaling: bool,
+    ) -> None:
+        if label_size.width() <= 0 or label_size.height() <= 0:
+            return
+        with self._lock:
+            self._latest = (frame, QSize(label_size), bbox, target_state, smooth_scaling)
+        self._wake.set()
+
+    def run(self) -> None:  # noqa: D401 -- QThread entry point
+        while self._running:
+            self._wake.wait()
+            if not self._running:
+                break
+            self._wake.clear()
+            item = self._take()
+            if item is None:
+                continue
+            frame, label_size, bbox, target_state, smooth_scaling = item
+            try:
+                image = self._render_image(frame, label_size, bbox, target_state, smooth_scaling)
+            except Exception:
+                continue
+            h, w = frame.shape[:2]
+            self.image_ready.emit(image, w, h)
+
+    def _take(self):
+        with self._lock:
+            item = self._latest
+            self._latest = None
+            return item
+
+    @staticmethod
+    def _render_image(
+        frame: np.ndarray,
+        label_size: QSize,
+        bbox: tuple[int, int, int, int] | None,
+        target_state: str,
+        smooth_scaling: bool,
+    ) -> QImage:
+        h, w = frame.shape[:2]
+        target_w, target_h = _fit_size(w, h, label_size.width(), label_size.height())
+        interpolation = _cv2_interpolation(w, h, target_w, target_h, smooth_scaling)
+        try:
+            import cv2
+
+            scaled = cv2.resize(frame, (target_w, target_h), interpolation=interpolation)
+            if bbox is not None and w > 0 and h > 0:
+                sx = target_w / w
+                sy = target_h / h
+                color_map = {
+                    "locked": (132, 220, 61),
+                    "weak": (32, 176, 255),
+                    "manual_required": (77, 77, 255),
+                }
+                bx, by, bw, bh = bbox
+                cv2.rectangle(
+                    scaled,
+                    (int(bx * sx), int(by * sy)),
+                    (int((bx + bw) * sx), int((by + bh) * sy)),
+                    color_map.get(target_state, (146, 136, 128)),
+                    3,
+                )
+        except Exception:
+            ys = np.linspace(0, h - 1, target_h).astype(int)
+            xs = np.linspace(0, w - 1, target_w).astype(int)
+            scaled = frame[ys][:, xs]
+        scaled = np.ascontiguousarray(scaled)
+        return QImage(scaled.data, target_w, target_h, scaled.strides[0], QImage.Format.Format_BGR888).copy()
+
+    def stop(self) -> None:
+        self._running = False
+        self._wake.set()
+        if not self.wait(2000):
+            self.terminate()
+            self.wait(500)
+
+
+def _fit_size(frame_w: int, frame_h: int, box_w: int, box_h: int) -> tuple[int, int]:
+    if frame_w <= 0 or frame_h <= 0 or box_w <= 0 or box_h <= 0:
+        return max(1, box_w), max(1, box_h)
+    scale = min(box_w / frame_w, box_h / frame_h)
+    return max(1, int(round(frame_w * scale))), max(1, int(round(frame_h * scale)))
+
+
+def _cv2_interpolation(frame_w: int, frame_h: int, target_w: int, target_h: int, smooth: bool) -> int:
+    try:
+        import cv2
+
+        if not smooth:
+            return cv2.INTER_NEAREST
+        if target_w < frame_w or target_h < frame_h:
+            return cv2.INTER_AREA
+        return cv2.INTER_LINEAR
+    except Exception:
+        return 0
 
 
 class PreviewView(QFrame):
@@ -133,10 +254,14 @@ class PreviewView(QFrame):
         self._frame_size: tuple[int, int] | None = None
         self._bbox: tuple[int, int, int, int] | None = None
         self._target_state = "idle"
-        self._last_pixmap: QPixmap | None = None
+        self._last_frame: np.ndarray | None = None
+        self._last_image: QImage | None = None
         self._min_render_interval_s = 1.0 / DEFAULT_MAX_RENDER_FPS
         self._last_render_at = 0.0
-        self._scale_mode = Qt.TransformationMode.FastTransformation
+        self._smooth_scaling = False
+        self._render_worker = PreviewRenderWorker(self)
+        self._render_worker.image_ready.connect(self._on_rendered_image)
+        self._render_worker.start()
 
         self._press_pos: QPoint | None = None
         self._recording = False
@@ -153,11 +278,7 @@ class PreviewView(QFrame):
             fps = DEFAULT_MAX_RENDER_FPS
         fps = max(0.0, min(60.0, fps))
         self._min_render_interval_s = 0.0 if fps <= 0 else 1.0 / fps
-        self._scale_mode = (
-            Qt.TransformationMode.SmoothTransformation
-            if smooth_scaling
-            else Qt.TransformationMode.FastTransformation
-        )
+        self._smooth_scaling = smooth_scaling
 
     def set_controls_scale(self, scale: float) -> None:
         """Enlarge the PTT/zoom/joystick thumb controls (display.controls_scale)
@@ -306,47 +427,34 @@ class PreviewView(QFrame):
     def update_frame(self, frame: np.ndarray) -> None:
         h, w = frame.shape[:2]
         self._frame_size = (w, h)
+        self._last_frame = frame
         now = time.monotonic()
         if self._min_render_interval_s > 0 and self._last_render_at:
             if now - self._last_render_at < self._min_render_interval_s:
                 return
         self._last_render_at = now
 
-        image = QImage(frame.data, w, h, frame.strides[0], QImage.Format.Format_BGR888)
-        # Keep the clean, unannotated full-res pixmap: the tracking rectangle
-        # is drawn onto the (much smaller) scaled copy in _render_scaled, not
-        # onto a full-res copy of every frame. That drops a ~2 MP QPixmap
-        # copy + allocation per tracked frame off the UI thread.
-        self._last_pixmap = QPixmap.fromImage(image)
         self._render_scaled()
 
     def _render_scaled(self) -> None:
-        """Scale the last frame to the label and draw the tracking box on the
-        scaled pixmap (coords mapped from frame space). Called per frame and
-        on resize."""
-        if self._last_pixmap is None:
+        """Request off-thread frame scaling/overlay for the latest frame."""
+        if self._last_frame is None:
             return
-        scaled = self._last_pixmap.scaled(
+        self._render_worker.submit(
+            self._last_frame,
             self._image_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            self._scale_mode,
+            self._bbox,
+            self._target_state,
+            self._smooth_scaling,
         )
-        if self._bbox is not None and self._frame_size is not None:
-            fw, fh = self._frame_size
-            if fw > 0 and fh > 0:
-                sx = scaled.width() / fw
-                sy = scaled.height() / fh
-                color_map = {
-                    "locked": QColor("#3ddc84"),
-                    "weak": QColor("#ffb020"),
-                    "manual_required": QColor("#ff4d4d"),
-                }
-                painter = QPainter(scaled)
-                painter.setPen(QPen(color_map.get(self._target_state, QColor("#808892")), 3))
-                bx, by, bw, bh = self._bbox
-                painter.drawRect(int(bx * sx), int(by * sy), int(bw * sx), int(bh * sy))
-                painter.end()
-        self._image_label.setPixmap(scaled)
+
+    def _on_rendered_image(self, image: QImage, frame_w: int, frame_h: int) -> None:
+        self._last_image = image
+        self._frame_size = (frame_w, frame_h)
+        self._image_label.setPixmap(QPixmap.fromImage(image))
+
+    def stop_renderer(self) -> None:
+        self._render_worker.stop()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)

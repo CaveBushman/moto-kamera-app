@@ -12,12 +12,12 @@ ai:
   model: /usr/share/hailo-models/yolov8s_h8.hef
   confidence: 0.35
   startup_delay_s: 5.0
-  max_fps: 2.0
-  max_input_width: 320
+  max_fps: 1.5
+  max_input_width: 256
   infer_timeout_ms: 70
-  performance_budget_pct: 12.0
-  guard_inference_ms: 120
-  guard_busy_ms: 250
+  performance_budget_pct: 10.0
+  guard_inference_ms: 150
+  guard_busy_ms: 300
   guard_util_pct: 35
   guard_cooldown_s: 15
   canary_max_inference_ms: 120

@@ -13,6 +13,14 @@ from motocam.ai import ai_worker as ai_worker_module
 from motocam.ai.ai_worker import AiWorker
 
 
+def test_resize_interpolation_prefers_area_for_downscaling():
+    interpolation = ai_worker_module._select_resize_interpolation(1920, 1080, 320, 180)
+    if ai_worker_module.cv2 is not None:
+        assert interpolation == ai_worker_module.cv2.INTER_AREA
+    else:
+        assert interpolation is None
+
+
 class _CountingDetector:
     """Records how many frames it was asked to infer and returns one
     detection tagged with the frame's marker value."""

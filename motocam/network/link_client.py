@@ -54,7 +54,10 @@ class LinkClient(QObject):
         return self._connected
 
     def start(self) -> None:
-        self._loop = asyncio.get_running_loop()
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = asyncio.get_event_loop()
         self._task = asyncio.ensure_future(self._run_forever())
 
     async def stop(self) -> None:

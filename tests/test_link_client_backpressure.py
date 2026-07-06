@@ -5,6 +5,27 @@ from motocam.core.protocol import GpsTelemetry, Telemetry
 from motocam.network.link_client import LinkClient
 
 
+def test_link_client_start_accepts_configured_loop_before_it_is_running():
+    loop = asyncio.new_event_loop()
+    previous_loop = None
+    try:
+        try:
+            previous_loop = asyncio.get_event_loop()
+        except RuntimeError:
+            previous_loop = None
+        asyncio.set_event_loop(loop)
+        client = LinkClient("ws://control-room", "moto-1")
+        client.start()
+
+        assert client._loop is loop
+        assert client._task is not None
+        client._task.cancel()
+    finally:
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+        asyncio.set_event_loop(previous_loop)
+
+
 def test_preview_send_keeps_only_latest_frame_under_backpressure():
     asyncio.run(_preview_backpressure_case())
 

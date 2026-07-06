@@ -228,6 +228,27 @@ def create_splash() -> QSplashScreen:
     return splash
 
 
+def _run_qt_with_asyncio(app: QApplication, loop: asyncio.AbstractEventLoop) -> int:
+    def _pump_asyncio_once() -> None:
+        if loop.is_closed():
+            return
+        try:
+            loop.run_until_complete(asyncio.sleep(0))
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger("motocam.main").warning("Asyncio pump failed: %s", exc)
+        if not app.closingDown():
+            QTimer.singleShot(10, _pump_asyncio_once)
+
+    QTimer.singleShot(0, _pump_asyncio_once)
+    try:
+        return app.exec()
+    finally:
+        if not loop.is_closed():
+            loop.stop()
+            loop.close()
+        asyncio.set_event_loop(None)
+
+
 async def _connect_hardware(name: str, connect_coro, timeout_s: float) -> None:
     logger = logging.getLogger("motocam.main")
     try:
@@ -374,16 +395,11 @@ def main() -> int:
 
     logger.info("Entering Qt event loop")
     _write_startup_state(config_path, "event_loop_entered")
-    try:
-        loop.run_forever()
-    finally:
-        loop.stop()
-        loop.close()
-        asyncio.set_event_loop(None)
+    exit_code = _run_qt_with_asyncio(app, loop)
 
     heartbeat.stop()
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

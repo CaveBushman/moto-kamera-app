@@ -30,6 +30,7 @@ LOG_QUEUE_MAX = 200
 class LinkClient(QObject):
     connected_changed = pyqtSignal(bool)
     command_received = pyqtSignal(str, dict)  # (MessageType value, payload)
+    error_received = pyqtSignal(str, str)  # code, message
     latency_updated = pyqtSignal(float)
 
     def __init__(self, url: str, unit_id: str = "moto-1"):
@@ -122,6 +123,13 @@ class LinkClient(QObject):
             if envelope.type == MessageType.PONG.value and self._last_ping_sent is not None:
                 self.latency_updated.emit((time.time() - self._last_ping_sent) * 1000)
                 continue
+            if envelope.type == MessageType.ERROR.value:
+                code = str(envelope.payload.get("code", "link_error"))
+                message = str(envelope.payload.get("message", code))
+                logger.error("Control room rejected link: %s (%s)", message, code)
+                self.error_received.emit(code, message)
+                await ws.close()
+                return
             self.command_received.emit(envelope.type, envelope.payload)
 
     def _set_connected(self, value: bool) -> None:

@@ -1,4 +1,6 @@
 unit_id: moto-1
+startup:
+  hardware_connect_delay_s: 3.0
 video:
   device: 1
   width: 1920
@@ -22,6 +24,8 @@ ai:
   labels: null
 tracking:
   max_input_width: 640
+  csrt_slow_warn_ms: 80
+  csrt_slow_disable_after: 12
 gimbal:
   type: dji_rs4_pro
   connection: ble
@@ -31,7 +35,7 @@ gimbal:
   ble_tx_char_uuid: null
   ble_rx_char_uuid: null
   ble_velocity_timeout_s: 0.15
-  ble_notify_stale_s: 3.0
+  ble_notify_stale_s: 10.0
   can_channel: can0
   can_bitrate: 1000000
   uart_device: /dev/ttyAMA0

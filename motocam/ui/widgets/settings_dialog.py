@@ -546,11 +546,11 @@ class SettingsDialog(QDialog):
         form.addRow("BLE joystick timeout", self.ble_velocity_timeout_spin)
 
         self.ble_notify_stale_spin = QDoubleSpinBox()
-        self.ble_notify_stale_spin.setRange(1.0, 15.0)
+        self.ble_notify_stale_spin.setRange(3.0, 60.0)
         self.ble_notify_stale_spin.setSingleStep(0.5)
         self.ble_notify_stale_spin.setDecimals(1)
         self.ble_notify_stale_spin.setSuffix(" s")
-        self.ble_notify_stale_spin.setValue(3.0)
+        self.ble_notify_stale_spin.setValue(10.0)
         form.addRow("BLE notify stale", self.ble_notify_stale_spin)
 
         self.can_channel_edit = QLineEdit()
@@ -587,7 +587,7 @@ class SettingsDialog(QDialog):
         self.ble_tx_char_uuid_edit.setText(str(cfg.get("ble_tx_char_uuid", "") or ""))
         self.ble_rx_char_uuid_edit.setText(str(cfg.get("ble_rx_char_uuid", "") or ""))
         self.ble_velocity_timeout_spin.setValue(float(cfg.get("ble_velocity_timeout_s", 0.15)))
-        self.ble_notify_stale_spin.setValue(float(cfg.get("ble_notify_stale_s", 3.0)))
+        self.ble_notify_stale_spin.setValue(float(cfg.get("ble_notify_stale_s", 10.0)))
         self.can_channel_edit.setText(str(cfg.get("can_channel", "can0")))
         self.uart_device_edit.setText(str(cfg.get("uart_device", "/dev/ttyAMA0")))
         self.uart_baudrate_spin.setValue(int(cfg.get("uart_baudrate", 115200)))

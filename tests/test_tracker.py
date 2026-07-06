@@ -45,6 +45,19 @@ def test_clear_resets_to_idle():
     assert engine.bbox is None
 
 
+def test_csrt_guard_disables_tracker_after_repeated_slow_updates():
+    engine = TrackingEngine(csrt_slow_warn_ms=1.0, csrt_slow_disable_after=2)
+    engine.select_at(FRAME, 320, 240)
+
+    engine._handle_update_timing(2.0)
+    assert engine.state == TargetState.LOCKED
+    engine._handle_update_timing(2.0)
+
+    assert engine.state == TargetState.MANUAL_REQUIRED
+    assert engine.bbox is None
+    assert engine.needs_frame_updates is False
+
+
 def test_error_from_center_is_none_without_a_target():
     engine = TrackingEngine()
     assert engine.error_from_center(FRAME.shape) is None

@@ -202,6 +202,7 @@ class DumlTelemetryTransport:
         # a real captured gimbal DUML frame (cmd_set 0x04, cmd_id 0x27)
         self._pending = bytes.fromhex("551204c70402719500042700800000002014")
         self.sent: list[bytes] = []
+        self.mtu_payload_bytes = 244
 
     async def open(self):
         pass
@@ -291,6 +292,25 @@ def test_ble_duml_velocity_stats_report_write_gap_and_timeouts():
     assert stats["velocity_call_gap_ms_avg"] is not None
     assert stats["velocity_call_gap_ms_max"] is not None
     assert stats["velocity_timeouts"] == 0
+    assert stats["ble_mtu_payload_bytes"] == 244
+    assert stats["ble_degraded"] is False
+
+
+def test_ble_duml_reports_degraded_low_mtu_and_throttles_non_stop_velocity():
+    transport = DumlTelemetryTransport()
+    transport.mtu_payload_bytes = 20
+    backend = DjiRs4ProBackend(transport, max_pan_speed=20.0, max_tilt_speed=12.0)
+    asyncio.run(backend.connect())
+
+    asyncio.run(backend.set_velocity(10.0, -6.0))
+    asyncio.run(backend.set_velocity(12.0, -6.0))
+    asyncio.run(backend.set_velocity(0.0, 0.0))
+    stats = backend.velocity_stats()
+
+    assert len(transport.sent) == 2
+    assert stats["ble_mtu_payload_bytes"] == 20
+    assert stats["ble_degraded"] is True
+    assert stats["velocity_throttle_drops"] == 1
 
 
 def test_ble_duml_health_check_marks_disconnected_transport_down():
@@ -303,15 +323,15 @@ def test_ble_duml_health_check_marks_disconnected_transport_down():
     assert backend.connected is False
 
 
-def test_ble_duml_health_check_marks_stale_notifications_down():
+def test_ble_duml_health_check_keeps_control_alive_on_stale_notifications():
     transport = DumlTelemetryTransport()
     transport.is_connected = lambda: True
     transport.notification_age_s = lambda: 9.0
     backend = DjiRs4ProBackend(transport, notify_stale_s=3.0)
     asyncio.run(backend.connect())
 
-    assert asyncio.run(backend.check_connection()) is False
-    assert backend.connected is False
+    assert asyncio.run(backend.check_connection()) is True
+    assert backend.connected is True
 
 
 def test_ble_duml_go_home_sends_the_recenter_frame():

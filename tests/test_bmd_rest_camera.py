@@ -70,6 +70,18 @@ def test_backend_starts_disconnected():
     assert backend.connected is False
 
 
+def test_disconnected_camera_reconnect_interval_backs_off():
+    backend = BlackmagicRestCameraBackend(ip="192.168.9.20")
+
+    assert backend._current_reconnect_interval_s() == 5.0
+    backend._connect_failures = 1
+    assert backend._current_reconnect_interval_s() == 10.0
+    backend._connect_failures = 3
+    assert backend._current_reconnect_interval_s() == 30.0
+    backend._connect_failures = 8
+    assert backend._current_reconnect_interval_s() == 30.0
+
+
 # -- transport configuration (HTTPS + auth) -------------------------------
 def test_tls_switches_url_scheme():
     backend = BlackmagicRestCameraBackend(ip="10.0.0.5", port=443, use_tls=True)

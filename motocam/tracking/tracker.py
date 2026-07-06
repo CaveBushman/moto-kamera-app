@@ -25,6 +25,8 @@ logger = logging.getLogger("motocam.tracking")
 
 WEAK_AFTER_S = 0.8
 LOST_AFTER_S = 2.5
+CSRT_SLOW_WARN_MS = 80.0
+CSRT_SLOW_DISABLE_AFTER = 12
 
 
 class TrackingEngine:
@@ -57,7 +59,12 @@ class TrackingEngine:
     the published target.
     """
 
-    def __init__(self, max_input_width: int = 0):
+    def __init__(
+        self,
+        max_input_width: int = 0,
+        csrt_slow_warn_ms: float = CSRT_SLOW_WARN_MS,
+        csrt_slow_disable_after: int = CSRT_SLOW_DISABLE_AFTER,
+    ):
         self._tracker: cv2.Tracker | None = None
         self._bbox: tuple[int, int, int, int] | None = None
         self._state: TargetState = TargetState.IDLE
@@ -78,6 +85,9 @@ class TrackingEngine:
         self._last_update_ms: float | None = None
         self._busy_started_at: float | None = None
         self._last_slow_log_at = 0.0
+        self._csrt_slow_warn_ms = max(1.0, float(csrt_slow_warn_ms))
+        self._csrt_slow_disable_after = max(0, int(csrt_slow_disable_after))
+        self._consecutive_slow_updates = 0
         # detection-driven peloton tracking (UI-thread only, no lock)
         self._byte = ByteTracker()
         self._locked_id: int | None = None
@@ -269,7 +279,7 @@ class TrackingEngine:
                     self._busy_started_at = None
                     self._last_update_ms = elapsed_ms
                     self._completed_updates += 1
-                self._log_slow_update(elapsed_ms)
+                self._handle_update_timing(elapsed_ms)
             except Exception as exc:  # noqa: BLE001 -- a bad frame must not kill tracking
                 with self._stats_lock:
                     self._busy_started_at = None
@@ -298,21 +308,38 @@ class TrackingEngine:
                 "failed_updates": self._failed_updates,
                 "last_update_ms": self._last_update_ms,
                 "current_busy_ms": busy_ms,
+                "consecutive_slow_updates": self._consecutive_slow_updates,
             }
 
-    def _log_slow_update(self, elapsed_ms: float) -> None:
-        if elapsed_ms < 80.0:
+    def _handle_update_timing(self, elapsed_ms: float) -> None:
+        if elapsed_ms < self._csrt_slow_warn_ms:
+            self._consecutive_slow_updates = 0
             return
+        self._consecutive_slow_updates += 1
         now = time.monotonic()
         if now - self._last_slow_log_at < 2.0:
-            return
-        self._last_slow_log_at = now
-        logger.warning(
-            "CSRT tracker update slow: %.0f ms state=%s bbox=%s",
-            elapsed_ms,
-            self._state.value,
-            self._bbox,
-        )
+            pass
+        else:
+            self._last_slow_log_at = now
+            logger.warning(
+                "CSRT tracker update slow: %.0f ms state=%s bbox=%s slow_count=%d",
+                elapsed_ms,
+                self._state.value,
+                self._bbox,
+                self._consecutive_slow_updates,
+            )
+        if self._csrt_slow_disable_after and self._consecutive_slow_updates >= self._csrt_slow_disable_after:
+            with self._lock:
+                if self._tracker is not None:
+                    self._tracker = None
+                    self._bbox = None
+                    self._state = TargetState.MANUAL_REQUIRED
+                    self._last_good_time = None
+            logger.warning(
+                "CSRT tracker disabled after %d slow updates; use AI/ByteTrack or reselect target",
+                self._consecutive_slow_updates,
+            )
+            self._consecutive_slow_updates = 0
 
     def _resize_for_tracker(self, frame: np.ndarray) -> tuple[np.ndarray, float]:
         if self._max_input_width <= 0:

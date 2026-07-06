@@ -50,6 +50,8 @@ logger = logging.getLogger("motocam.camera.bmd_rest")
 
 REQUEST_TIMEOUT_S = 1.5
 RECONNECT_MIN_INTERVAL_S = 5.0
+BMD_RECONNECT_MAX_INTERVAL_S = 30.0
+BMD_OFFLINE_LOG_INTERVAL_S = 30.0
 # One rocker tick at full deflection nudges the zoom target by this much
 # of the lens range; the control loop re-sends at 20 Hz, so full-speed
 # travel end-to-end takes ~1.7 s -- REST has position control only, no
@@ -133,6 +135,8 @@ class BlackmagicRestCameraBackend(CameraBackend):
         self._auth_header = self._build_auth_header(auth_token, username, password)
         self._connected = False
         self._last_connect_attempt = 0.0
+        self._connect_failures = 0
+        self._last_offline_log_at = 0.0
         self._zoom_normalised: float | None = None
         self._zoom_unsupported_logged = False
 
@@ -192,10 +196,10 @@ class BlackmagicRestCameraBackend(CameraBackend):
 
     async def connect(self) -> None:
         # Called every refresh tick while disconnected (CameraController
-        # retries) -- throttle so an absent camera costs one probe per
-        # RECONNECT_MIN_INTERVAL_S, not one per 500 ms tick.
+        # retries) -- throttle so an absent camera does not keep a slow
+        # REST timeout permanently in the event-loop's executor queue.
         now = time.monotonic()
-        if now - self._last_connect_attempt < RECONNECT_MIN_INTERVAL_S:
+        if now - self._last_connect_attempt < self._current_reconnect_interval_s():
             return
         self._last_connect_attempt = now
         try:
@@ -203,16 +207,33 @@ class BlackmagicRestCameraBackend(CameraBackend):
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             if self._connected:
                 logger.warning("Blackmagic camera at %s:%d lost: %s", self.ip, self.port, exc)
+                self._last_offline_log_at = now
             else:
-                logger.info("Blackmagic camera not reachable at %s:%d (%s), will retry", self.ip, self.port, exc)
+                if now - self._last_offline_log_at >= BMD_OFFLINE_LOG_INTERVAL_S:
+                    logger.info(
+                        "Blackmagic camera not reachable at %s:%d (%s), will retry in %.0fs",
+                        self.ip,
+                        self.port,
+                        exc,
+                        self._current_reconnect_interval_s(),
+                    )
+                    self._last_offline_log_at = now
+            self._connect_failures += 1
             self._connected = False
             return
         if not self._connected:
             logger.info("Blackmagic camera connected at %s:%d (REST /system OK)", self.ip, self.port)
+        self._connect_failures = 0
+        self._last_offline_log_at = 0.0
         self._connected = True
         zoom = await self._try_get("/lens/zoom")
         if zoom is not None and "normalised" in zoom:
             self._zoom_normalised = float(zoom["normalised"])
+
+    def _current_reconnect_interval_s(self) -> float:
+        if self._connected:
+            return RECONNECT_MIN_INTERVAL_S
+        return min(BMD_RECONNECT_MAX_INTERVAL_S, RECONNECT_MIN_INTERVAL_S * (2 ** min(self._connect_failures, 3)))
 
     async def disconnect(self) -> None:
         self._connected = False

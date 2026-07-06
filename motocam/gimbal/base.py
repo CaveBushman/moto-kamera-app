@@ -64,6 +64,15 @@ class GimbalController:
         elif mode == OperatingMode.LOCK:
             await self.backend.set_velocity(0.0, 0.0)
 
+    async def recenter(self) -> None:
+        """Momentary HOME command that preserves the active control mode.
+
+        The GIMBAL/CAMERA panel's HOME button is an action, not an operating
+        mode. In AI ASSIST/FULL AI the tracker must keep sending corrections
+        immediately after the recenter command finishes.
+        """
+        await self.backend.go_home()
+
     async def manual_move(self, pan_deg_s: float, tilt_deg_s: float) -> None:
         if self.mode != OperatingMode.MANUAL:
             return

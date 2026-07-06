@@ -111,8 +111,12 @@ class MainWindow(QMainWindow):
         audio_cfg = self._config.get("audio") or {}
         safety_cfg = self._config.get("safety") or {}
         preview_cfg = self._config.get("preview_relay") or {}
+        startup_cfg = self._config.get("startup") or {}
         self._ride_lock_enabled = bool(safety_cfg.get("ride_lock_enabled", False))
         self._ride_lock_speed_kmh = float(safety_cfg.get("ride_lock_speed_kmh", 15.0))
+        self._hardware_connect_delay_s = max(0.0, float(startup_cfg.get("hardware_connect_delay_s", 0.0) or 0.0))
+        self._hardware_connect_enabled = False
+        self._hardware_start_timer: QTimer | None = None
         self._preview_interval_s = preview_interval_s(preview_cfg.get("fps", 5))
         self._preview_jpeg_quality = preview_jpeg_quality(preview_cfg.get("jpeg_quality", 55))
         self._preview_max_width = preview_cfg.get("max_width", 960)
@@ -129,8 +133,13 @@ class MainWindow(QMainWindow):
         self._ai_runtime_enabled = self._ai_type in {"hailo", "simulated", "simulation", "sim"}
         self._ai_startup_delay_s = max(0.0, float(ai_cfg.get("startup_delay_s", 0.0) or 0.0))
         self._ai_worker_started = False
+        self._ai_start_timer: QTimer | None = None
 
-        self.tracker = TrackingEngine(max_input_width=int(tracking_cfg.get("max_input_width", 640) or 0))
+        self.tracker = TrackingEngine(
+            max_input_width=int(tracking_cfg.get("max_input_width", 640) or 0),
+            csrt_slow_warn_ms=float(tracking_cfg.get("csrt_slow_warn_ms", 80.0) or 80.0),
+            csrt_slow_disable_after=int(tracking_cfg.get("csrt_slow_disable_after", 12) or 0),
+        )
         self.ai_engine = AiEngine(
             detector=NullDetector("initializing" if self._ai_runtime_enabled else "null_disabled"),
             target_class=ai_cfg.get("target_class", "cyclist"),
@@ -318,6 +327,7 @@ class MainWindow(QMainWindow):
 
         self.link.connected_changed.connect(self._on_link_connected)
         self.link.command_received.connect(self._on_command_received)
+        self.link.error_received.connect(self._on_link_error)
         self.link.latency_updated.connect(self._on_latency)
 
         self._settings.iso_changed.connect(lambda v: asyncio.ensure_future(self.camera.set_iso(v)))
@@ -464,11 +474,22 @@ class MainWindow(QMainWindow):
         if self._ai_runtime_enabled:
             if self._ai_startup_delay_s > 0:
                 logger.info("AI runtime will start after %.1fs stability delay", self._ai_startup_delay_s)
-                QTimer.singleShot(int(self._ai_startup_delay_s * 1000), self._start_ai_runtime)
+                self._ai_start_timer = QTimer(self)
+                self._ai_start_timer.setSingleShot(True)
+                self._ai_start_timer.timeout.connect(self._start_ai_runtime)
+                self._ai_start_timer.start(int(self._ai_startup_delay_s * 1000))
             else:
                 self._start_ai_runtime()
         else:
             logger.info("AI runtime disabled by config; detector and AI worker will not start")
+        if self._hardware_connect_delay_s > 0:
+            logger.info("Hardware connect will start after %.1fs stability delay", self._hardware_connect_delay_s)
+            self._hardware_start_timer = QTimer(self)
+            self._hardware_start_timer.setSingleShot(True)
+            self._hardware_start_timer.timeout.connect(self._enable_hardware_connect)
+            self._hardware_start_timer.start(int(self._hardware_connect_delay_s * 1000))
+        else:
+            self._enable_hardware_connect()
 
         self._control_timer = QTimer(self)
         # Qt's default CoarseTimer can legitimately drift by up to ~5% (or
@@ -501,9 +522,21 @@ class MainWindow(QMainWindow):
     def _start_ai_runtime(self) -> None:
         if self._ai_worker_started or not self._ai_runtime_enabled:
             return
+        if self._ai_start_timer is not None:
+            self._ai_start_timer.stop()
+            self._ai_start_timer = None
         self._ai_worker_started = True
         logger.info("Starting AI worker (type=%s)", self._ai_type or "unknown")
         self.ai_worker.start()
+
+    def _enable_hardware_connect(self) -> None:
+        if self._hardware_connect_enabled:
+            return
+        if self._hardware_start_timer is not None:
+            self._hardware_start_timer.stop()
+            self._hardware_start_timer = None
+        self._hardware_connect_enabled = True
+        logger.info("Hardware connect enabled")
 
     # -- Video / tracking --------------------------------------------------
     def _on_frame(self, frame: np.ndarray) -> None:
@@ -808,7 +841,7 @@ class MainWindow(QMainWindow):
         self._sync_joystick_active()
 
     def _on_home(self) -> None:
-        asyncio.ensure_future(self.gimbal.set_mode(OperatingMode.HOME))
+        asyncio.ensure_future(self.gimbal.recenter())
 
     def _on_lock_toggled(self, locked: bool) -> None:
         mode = OperatingMode.LOCK if locked else OperatingMode.MANUAL
@@ -870,15 +903,16 @@ class MainWindow(QMainWindow):
         self.preview.set_ride_locked(locked)
 
     def _async_refresh_tick(self) -> None:
-        self._schedule_unique_task("_camera_refresh_task", "camera refresh", self.camera.refresh)
-        if self.gimbal.connected:
-            self._schedule_unique_task(
-                "_gimbal_refresh_task",
-                "gimbal watchdog refresh",
-                self._gimbal_watchdog_refresh,
-            )
-        else:
-            self._schedule_unique_task("_gimbal_connect_task", "gimbal connect", self.gimbal.connect)
+        if self._hardware_connect_enabled:
+            self._schedule_unique_task("_camera_refresh_task", "camera refresh", self.camera.refresh)
+            if self.gimbal.connected:
+                self._schedule_unique_task(
+                    "_gimbal_refresh_task",
+                    "gimbal watchdog refresh",
+                    self._gimbal_watchdog_refresh,
+                )
+            else:
+                self._schedule_unique_task("_gimbal_connect_task", "gimbal connect", self.gimbal.connect)
         self.gimbal_panel.update_orientation(self.gimbal.pan_deg, self.gimbal.tilt_deg, self.gimbal.roll_deg)
         self.gimbal_panel.set_connected(self.gimbal.connected)
         self.camera_panel.update_state(self.camera.state)
@@ -936,6 +970,8 @@ class MainWindow(QMainWindow):
             gimbal=GimbalTelemetry(
                 connected=self.gimbal.connected, mode=self.gimbal.mode.value,
                 pan_deg=self.gimbal.pan_deg, tilt_deg=self.gimbal.tilt_deg, roll_deg=self.gimbal.roll_deg,
+                ble_mtu_payload_bytes=gimbal_stats.get("ble_mtu_payload_bytes"),
+                ble_degraded=bool(gimbal_stats.get("ble_degraded")),
                 velocity_write_ms_avg=gimbal_stats.get("velocity_write_ms_avg"),
                 velocity_write_ms_max=gimbal_stats.get("velocity_write_ms_max"),
                 velocity_call_gap_ms_avg=gimbal_stats.get("velocity_call_gap_ms_avg"),
@@ -990,6 +1026,8 @@ class MainWindow(QMainWindow):
             f"ble_avg={self._fmt_ms(gimbal_stats.get('velocity_write_ms_avg'))} "
             f"ble_max={self._fmt_ms(gimbal_stats.get('velocity_write_ms_max'))} "
             f"ble_timeouts={int(gimbal_stats.get('velocity_timeouts') or 0)} "
+            f"ble_mtu={gimbal_stats.get('ble_mtu_payload_bytes') or '--'} "
+            f"ble_deg={int(bool(gimbal_stats.get('ble_degraded')))} "
             f"cpu={self._fmt_pct(getattr(sys_stats, 'cpu_pct', None))} "
             f"temp={self._fmt_c(getattr(sys_stats, 'temperature_c', None))} "
             f"video_fps={getattr(sys_stats, 'video_fps', None) or 0:.0f} "
@@ -1036,6 +1074,12 @@ class MainWindow(QMainWindow):
     def _on_link_connected(self, connected: bool) -> None:
         self.top_bar.net_chip.set_state("ok" if connected else "bad", "UP" if connected else "DOWN")
         self.preview.set_link_state(connected, self._preview_streaming)
+
+    def _on_link_error(self, code: str, message: str) -> None:
+        logger.error("Control room link error: %s (%s)", message, code)
+        text = "DUP ID" if code == "duplicate_unit_id" else "ERROR"
+        self.top_bar.net_chip.set_state("bad", text)
+        self.preview.set_link_state(False, False)
 
     def _on_latency(self, latency_ms: float) -> None:
         self.top_bar.latency_chip.set_state("ok" if latency_ms < 150 else "warn", f"LAT {latency_ms:.0f} ms")
@@ -1205,6 +1249,10 @@ class MainWindow(QMainWindow):
 
     def _on_gimbal_apply(self, gimbal_cfg: dict) -> None:
         current_cfg = self._config.setdefault("gimbal", {})
+        changed = any(current_cfg.get(key) != value for key, value in gimbal_cfg.items())
+        if not changed:
+            logger.info("Gimbal settings unchanged; keeping existing backend connected")
+            return
         max_pan_speed = current_cfg.get("max_pan_speed", self.gimbal.max_pan_speed)
         max_tilt_speed = current_cfg.get("max_tilt_speed", self.gimbal.max_tilt_speed)
         current_cfg.update(gimbal_cfg)

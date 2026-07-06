@@ -37,6 +37,7 @@ class MessageType(str, Enum):
     STAGE_INFO = "stage_info"
     SWITCHER_STATE = "switcher_state"
     PING = "ping"
+    ERROR = "error"
 
 
 class OperatingMode(str, Enum):
@@ -87,6 +88,8 @@ class GimbalTelemetry:
     pan_deg: float = 0.0
     tilt_deg: float = 0.0
     roll_deg: float = 0.0
+    ble_mtu_payload_bytes: int | None = None
+    ble_degraded: bool = False
     velocity_write_ms_avg: float | None = None
     velocity_write_ms_max: float | None = None
     velocity_call_gap_ms_avg: float | None = None

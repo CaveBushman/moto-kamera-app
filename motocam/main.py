@@ -252,8 +252,6 @@ def main() -> int:
     logger.info("UI watchdog started")
 
     with loop:
-        logger.info("Scheduling async hardware connect")
-        loop.create_task(async_connect_all(gimbal, camera))
         logger.info("Entering Qt event loop")
         loop.run_forever()
 

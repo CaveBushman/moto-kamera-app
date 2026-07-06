@@ -58,7 +58,11 @@ CAN_RECV_ID = 0x222  # verified against the reference implementation
 CAN_BITRATE = 1_000_000
 RECONNECT_MIN_INTERVAL_S = 5.0
 REPLY_TIMEOUT_S = 0.8
-BLE_NOTIFY_STALE_S = 3.0
+BLE_NOTIFY_STALE_S = 10.0
+BLE_DEGRADED_MTU_PAYLOAD_BYTES = 20
+BLE_FAST_SEND_INTERVAL_S = 0.05
+BLE_SLOW_SEND_INTERVAL_S = 0.10
+BLE_DEGRADED_SEND_INTERVAL_S = 0.15
 # Bounds a single joystick write's wait. A command older than a few hundred
 # milliseconds is already harmful for hand control: waiting behind it is the
 # "rubber band" lag the rider feels. Timeout drops the stale write so the
@@ -661,6 +665,9 @@ class DjiRs4ProBackend(GimbalBackend):
         self._last_velocity_stats: dict[str, float | int | None] = {}
         self._last_velocity_call_at: float | None = None
         self._velocity_stats_logged_at = 0.0
+        self._notify_stale_logged = False
+        self._next_velocity_send_at = 0.0
+        self._velocity_throttle_drop_count = 0
 
     def _next_sequence(self) -> int:
         self._sequence = (self._sequence + 1) & 0xFFFF
@@ -705,6 +712,7 @@ class DjiRs4ProBackend(GimbalBackend):
                     self._connected = False
                     return
                 self._connected = True
+                self._notify_stale_logged = False
                 logger.info(
                     "DJI RS 4 Pro connected via %s (DUML telemetry OK). Joystick velocity "
                     "and recenter (HOME/RESET) control are both live.",
@@ -723,6 +731,7 @@ class DjiRs4ProBackend(GimbalBackend):
                 return
             self._last_orientation = orientation
             self._connected = True
+            self._notify_stale_logged = False
             logger.info("DJI RS 4 Pro connected via %s R SDK transport (position reply OK)", label)
 
     async def disconnect(self) -> None:
@@ -766,13 +775,15 @@ class DjiRs4ProBackend(GimbalBackend):
         if not self._connected:
             return
         if self._protocol == "duml":
-            ratio_pan = max(-1.0, min(1.0, pan_deg_s / self.max_pan_speed))
-            ratio_tilt = max(-1.0, min(1.0, tilt_deg_s / self.max_tilt_speed))
-            frame = build_joystick_frame(self._next_sequence(), ch_a=ratio_tilt, ch_c=ratio_pan)
             now = time.monotonic()
             if self._last_velocity_call_at is not None:
                 self._velocity_call_gaps_ms.append((now - self._last_velocity_call_at) * 1000.0)
             self._last_velocity_call_at = now
+            if not self._should_send_velocity_now(now, pan_deg_s, tilt_deg_s):
+                return
+            ratio_pan = max(-1.0, min(1.0, pan_deg_s / self.max_pan_speed))
+            ratio_tilt = max(-1.0, min(1.0, tilt_deg_s / self.max_tilt_speed))
+            frame = build_joystick_frame(self._next_sequence(), ch_a=ratio_tilt, ch_c=ratio_pan)
             send_start = now
             try:
                 await asyncio.wait_for(
@@ -780,6 +791,7 @@ class DjiRs4ProBackend(GimbalBackend):
                 )
             except asyncio.TimeoutError:
                 self._velocity_timeout_count += 1
+                self._next_velocity_send_at = time.monotonic() + BLE_DEGRADED_SEND_INTERVAL_S
                 logger.warning(
                     "BLE joystick write stalled past %.2fs, abandoning -- next tick's "
                     "freshest command will be sent instead of waiting behind it",
@@ -792,7 +804,9 @@ class DjiRs4ProBackend(GimbalBackend):
                 logger.warning("BLE joystick send failed (%s), marking disconnected", exc)
                 self._connected = False
                 return
-            self._velocity_send_durations_ms.append((time.monotonic() - send_start) * 1000.0)
+            elapsed_ms = (time.monotonic() - send_start) * 1000.0
+            self._velocity_send_durations_ms.append(elapsed_ms)
+            self._next_velocity_send_at = time.monotonic() + self._adaptive_velocity_interval(elapsed_ms)
             self._log_velocity_timing_stats(now)
             return
         frame = build_speed_control(self._next_sequence(), pan_deg_s, tilt_deg_s)
@@ -812,28 +826,70 @@ class DjiRs4ProBackend(GimbalBackend):
         durations = self._velocity_send_durations_ms
         gaps = self._velocity_call_gaps_ms
         stats = self._build_velocity_stats(durations, gaps, self._velocity_timeout_count)
+        stats.update(self._ble_transport_stats())
+        stats["velocity_throttle_drops"] = self._velocity_throttle_drop_count
         self._last_velocity_stats = stats
         logger.info(
             "BLE joystick timing (n=%d): write_ms min/avg/max=%.1f/%.1f/%.1f  "
-            "call_gap_ms min/avg/max=%s  timeouts=%d",
+            "call_gap_ms min/avg/max=%s  timeouts=%d throttle_drop=%d mtu=%s degraded=%s",
             len(durations),
             min(durations), sum(durations) / len(durations), max(durations),
             f"{min(gaps):.1f}/{sum(gaps) / len(gaps):.1f}/{max(gaps):.1f}" if gaps else "n/a",
             self._velocity_timeout_count,
+            self._velocity_throttle_drop_count,
+            stats.get("ble_mtu_payload_bytes"),
+            int(bool(stats.get("ble_degraded"))),
         )
         self._velocity_send_durations_ms.clear()
         self._velocity_call_gaps_ms.clear()
         self._velocity_timeout_count = 0
+        self._velocity_throttle_drop_count = 0
         self._velocity_stats_logged_at = now
 
     def velocity_stats(self) -> dict[str, float | int | None]:
         if self._velocity_send_durations_ms:
-            return self._build_velocity_stats(
+            stats = self._build_velocity_stats(
                 self._velocity_send_durations_ms,
                 self._velocity_call_gaps_ms,
                 self._velocity_timeout_count,
             )
-        return dict(self._last_velocity_stats)
+            stats.update(self._ble_transport_stats())
+            stats["velocity_throttle_drops"] = self._velocity_throttle_drop_count
+            return stats
+        stats = dict(self._last_velocity_stats)
+        stats.update(self._ble_transport_stats())
+        return stats
+
+    def _should_send_velocity_now(self, now: float, pan_deg_s: float, tilt_deg_s: float) -> bool:
+        # Always try to send an explicit stop; throttling a stop command is
+        # worse than dropping an intermediate move command.
+        if abs(pan_deg_s) < 1e-6 and abs(tilt_deg_s) < 1e-6:
+            self._next_velocity_send_at = now
+            return True
+        if now < self._next_velocity_send_at:
+            self._velocity_throttle_drop_count += 1
+            return False
+        return True
+
+    def _adaptive_velocity_interval(self, elapsed_ms: float) -> float:
+        if self._ble_is_degraded() or elapsed_ms >= 140.0:
+            return BLE_DEGRADED_SEND_INTERVAL_S
+        if elapsed_ms >= 80.0:
+            return BLE_SLOW_SEND_INTERVAL_S
+        return BLE_FAST_SEND_INTERVAL_S
+
+    def _ble_transport_stats(self) -> dict[str, int | bool | None]:
+        if self._protocol != "duml":
+            return {"ble_mtu_payload_bytes": None, "ble_degraded": False}
+        mtu_payload = getattr(self.transport, "mtu_payload_bytes", None)
+        return {
+            "ble_mtu_payload_bytes": int(mtu_payload) if isinstance(mtu_payload, int) else None,
+            "ble_degraded": self._ble_is_degraded(),
+        }
+
+    def _ble_is_degraded(self) -> bool:
+        mtu_payload = getattr(self.transport, "mtu_payload_bytes", None)
+        return isinstance(mtu_payload, int) and mtu_payload <= BLE_DEGRADED_MTU_PAYLOAD_BYTES
 
     @staticmethod
     def _build_velocity_stats(
@@ -903,13 +959,15 @@ class DjiRs4ProBackend(GimbalBackend):
         if self._protocol == "duml":
             notify_age = await self._notification_age_s()
             if notify_age is not None and notify_age > self.notify_stale_s:
-                logger.warning(
-                    "Gimbal BLE notify stream stale for %.1fs, marking disconnected",
-                    notify_age,
-                )
-                self._connected = False
-                await self._close_after_health_failure()
-                return False
+                if not self._notify_stale_logged:
+                    logger.warning(
+                        "Gimbal BLE notify stream stale for %.1fs; keeping joystick control alive "
+                        "because BLE transport is still connected",
+                        notify_age,
+                    )
+                    self._notify_stale_logged = True
+            else:
+                self._notify_stale_logged = False
         return alive
 
     async def _notification_age_s(self) -> float | None:

@@ -33,6 +33,34 @@ def test_motocam_logs_are_forwarded_to_control_room():
     assert link.events == [("WARNING", "BLE disconnected", "motocam.test.forward")]
 
 
+def test_hailo_compare_logs_are_forwarded_to_control_room():
+    link = FakeLink()
+    logger = logging.getLogger("motocam.ai.hailo")
+    root = logging.getLogger("motocam")
+    old_handlers = list(root.handlers)
+    old_level = root.level
+    old_propagate = root.propagate
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+    root.propagate = False
+    try:
+        install_control_room_log_forwarder(root, link)
+        logger.info("HAILO_COMPARE dot=(10.0,20.0) hailo=(12.0,23.0) err=3.6px")
+    finally:
+        root.handlers.clear()
+        root.handlers.extend(old_handlers)
+        root.setLevel(old_level)
+        root.propagate = old_propagate
+
+    assert link.events == [
+        (
+            "INFO",
+            "HAILO_COMPARE dot=(10.0,20.0) hailo=(12.0,23.0) err=3.6px",
+            "motocam.ai.hailo",
+        )
+    ]
+
+
 def test_startup_log_buffer_replays_early_logs_to_control_room():
     link = FakeLink()
     logger = logging.getLogger("motocam.test.startup")

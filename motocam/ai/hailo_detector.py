@@ -365,15 +365,20 @@ class HailoCanaryDetector:
         fallback: DotDetector,
         max_inference_ms: float = 180.0,
         max_consecutive_errors: int = 3,
+        compare_dot: bool = True,
+        compare_log_interval_s: float = 1.0,
     ):
         self.primary = primary
         self.fallback = fallback
         self.max_inference_ms = max(10.0, float(max_inference_ms or 180.0))
         self.max_consecutive_errors = max(1, int(max_consecutive_errors or 3))
+        self.compare_dot = bool(compare_dot)
+        self.compare_log_interval_s = max(0.1, float(compare_log_interval_s or 1.0))
         self._disabled_reason: str | None = "unavailable" if primary is None else None
         self._last_primary_ms: float | None = None
         self._last_source = "dot_ai" if primary is None else "hailo"
         self._slow_count = 0
+        self._last_compare_log_at = 0.0
 
     @property
     def source(self) -> str:  # type: ignore[override]
@@ -390,6 +395,8 @@ class HailoCanaryDetector:
         detections = self.primary.infer(frame)
         elapsed_ms = (time.monotonic() - start) * 1000.0
         self._last_primary_ms = elapsed_ms
+        dot_detections = self.fallback.infer(frame) if self.compare_dot else []
+        self._log_hailo_against_dot(detections, dot_detections, elapsed_ms)
 
         if elapsed_ms > self.max_inference_ms:
             self._slow_count += 1
@@ -416,6 +423,60 @@ class HailoCanaryDetector:
         self._last_source = "hailo"
         return detections
 
+    def _log_hailo_against_dot(
+        self,
+        hailo_detections: list[Detection],
+        dot_detections: list[Detection],
+        elapsed_ms: float,
+    ) -> None:
+        if not self.compare_dot:
+            return
+        now = time.monotonic()
+        if now - self._last_compare_log_at < self.compare_log_interval_s:
+            return
+        self._last_compare_log_at = now
+        dot = _best_detection(dot_detections)
+        hailo = _nearest_detection(hailo_detections, dot) if dot is not None else _best_detection(hailo_detections)
+        if dot is None and hailo is None:
+            logger.info("HAILO_COMPARE dot=none hailo=none inference=%.0fms", elapsed_ms)
+            return
+        if dot is None:
+            hx, hy = _center(hailo)
+            logger.info(
+                "HAILO_COMPARE dot=none hailo=(%.1f,%.1f) conf=%.2f inference=%.0fms",
+                hx,
+                hy,
+                hailo.confidence,
+                elapsed_ms,
+            )
+            return
+        dx, dy = _center(dot)
+        if hailo is None:
+            logger.info(
+                "HAILO_COMPARE dot=(%.1f,%.1f) hailo=none inference=%.0fms",
+                dx,
+                dy,
+                elapsed_ms,
+            )
+            return
+        hx, hy = _center(hailo)
+        err_x = hx - dx
+        err_y = hy - dy
+        err = float(np.hypot(err_x, err_y))
+        logger.info(
+            "HAILO_COMPARE dot=(%.1f,%.1f) hailo=(%.1f,%.1f) "
+            "delta=(%+.1f,%+.1f) err=%.1fpx conf=%.2f inference=%.0fms",
+            dx,
+            dy,
+            hx,
+            hy,
+            err_x,
+            err_y,
+            err,
+            hailo.confidence,
+            elapsed_ms,
+        )
+
     def _disable(self, reason: str) -> None:
         if self._disabled_reason is not None:
             return
@@ -432,6 +493,25 @@ class HailoCanaryDetector:
         if self._last_source == "hailo" and self.primary is not None:
             return self.primary.fps
         return self.fallback.fps
+
+
+def _center(det: Detection) -> tuple[float, float]:
+    return det.x + det.w / 2.0, det.y + det.h / 2.0
+
+
+def _best_detection(detections: list[Detection]) -> Detection | None:
+    if not detections:
+        return None
+    return max(detections, key=lambda det: det.confidence)
+
+
+def _nearest_detection(detections: list[Detection], reference: Detection | None) -> Detection | None:
+    if not detections:
+        return None
+    if reference is None:
+        return _best_detection(detections)
+    rx, ry = _center(reference)
+    return min(detections, key=lambda det: (det.x + det.w / 2.0 - rx) ** 2 + (det.y + det.h / 2.0 - ry) ** 2)
 
 
 class DevHefDetector(SimulatedDetector):
@@ -500,6 +580,8 @@ def build_detector(cfg: dict):
             fallback=fallback,
             max_inference_ms=float(ai_cfg.get("canary_max_inference_ms", ai_cfg.get("guard_inference_ms", 180)) or 180),
             max_consecutive_errors=int(ai_cfg.get("canary_max_errors", 3) or 3),
+            compare_dot=bool(ai_cfg.get("canary_compare_dot", True)),
+            compare_log_interval_s=float(ai_cfg.get("canary_compare_log_interval_s", 1.0) or 1.0),
         )
     if ai_type != "hailo":
         return NullDetector("null_disabled")

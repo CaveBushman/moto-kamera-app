@@ -176,6 +176,37 @@ def test_hailo_canary_disables_repeated_primary_errors():
     assert len(dets) == 1
 
 
+def test_hailo_canary_logs_primary_error_against_dot_reference(caplog):
+    class OffsetPrimary:
+        source = "hailo"
+        last_inference_ok = True
+        consecutive_errors = 0
+
+        def infer(self, _frame):
+            return [Detection(x=190, y=120, w=20, h=20, confidence=0.74, class_name="bicycle")]
+
+        @property
+        def fps(self):
+            return 10.0
+
+    detector = HailoCanaryDetector(
+        primary=OffsetPrimary(),
+        fallback=DotDetector(min_area=6, pad=10),
+        compare_dot=True,
+        compare_log_interval_s=0.1,
+    )
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    frame[116:126, 156:166] = (0, 150, 255)
+
+    with caplog.at_level("INFO", logger="motocam.ai.hailo"):
+        dets = detector.infer(frame)
+
+    assert len(dets) == 1
+    assert "HAILO_COMPARE" in caplog.text
+    assert "err=" in caplog.text
+    assert "conf=0.74" in caplog.text
+
+
 def test_build_detector_reports_missing_hailo_model():
     detector = build_detector({"ai": {"type": "hailo", "model": "/nonexistent.hef"}})
     assert isinstance(detector, NullDetector)

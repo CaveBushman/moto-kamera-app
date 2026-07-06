@@ -22,6 +22,8 @@ ai:
   guard_cooldown_s: 15
   canary_max_inference_ms: 120
   canary_max_errors: 3
+  canary_compare_dot: true
+  canary_compare_log_interval_s: 1.0
   target_class: bicycle
   dot_min_area: 12
   dot_max_area_ratio: 0.08

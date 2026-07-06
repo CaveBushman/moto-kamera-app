@@ -186,6 +186,9 @@ class MainWindow(QMainWindow):
         self._gps_reconfigure_worker: GpsReconfigureWorker | None = None
         self._pending_gps_config: tuple[str, int | str] | None = None
         self._gps_reconfiguring = False
+        self._gps_open_task: asyncio.Task | None = None
+        self._video_engine_started = False
+        self._link_started = False
         self._last_pipeline_log_at = 0.0
         self._last_slow_frame_log_at = 0.0
         self._runtime_started = False
@@ -452,6 +455,7 @@ class MainWindow(QMainWindow):
             "_gimbal_connect_task",
             "_gimbal_velocity_task",
             "_zoom_task",
+            "_gps_open_task",
         ):
             task = getattr(self, attr_name, None)
             if task is not None and not task.done():
@@ -469,6 +473,9 @@ class MainWindow(QMainWindow):
             return
         self._runtime_started = True
         logger.info("Starting UI runtime timers/workers")
+        self._start_video_runtime()
+        self._start_link_runtime()
+        self._start_gps_runtime()
         self._preview_encoder.start()
         self.tracker.start()
         if self._ai_runtime_enabled:
@@ -518,6 +525,41 @@ class MainWindow(QMainWindow):
         self._ping_timer = QTimer(self)
         self._ping_timer.timeout.connect(self.link.send_ping)
         self._ping_timer.start(5000)
+
+    def _start_video_runtime(self) -> None:
+        if self._video_engine_started:
+            return
+        self._video_engine_started = True
+        try:
+            logger.info("Starting video engine")
+            self.video_engine.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Video engine start failed; UI stays live: %s", exc)
+
+    def _start_link_runtime(self) -> None:
+        if self._link_started:
+            return
+        self._link_started = True
+        try:
+            logger.info("Starting control room link")
+            self.link.start()
+        except Exception as exc:  # noqa: BLE001
+            self._link_started = False
+            logger.warning("Control room link start failed; retry from settings or restart link: %s", exc)
+
+    def _start_gps_runtime(self) -> None:
+        if self._gps_open_task is not None and not self._gps_open_task.done():
+            return
+        logger.info("Opening GPS in background")
+        self._gps_open_task = asyncio.ensure_future(self._open_gps_background())
+        self._gps_open_task.add_done_callback(lambda task: self._on_unique_task_done("_gps_open_task", "gps open", task))
+
+    async def _open_gps_background(self) -> None:
+        # Auto-detect scans serial devices/baudrates and can take seconds on
+        # a Pi with multiple USB devices. Keep it off the UI thread so a
+        # missing/slow GPS can never look like a frozen app at startup.
+        await asyncio.to_thread(self.gps.open)
+        logger.info("GPS open finished (source=%s)", self.gps.source)
 
     def _start_ai_runtime(self) -> None:
         if self._ai_worker_started or not self._ai_runtime_enabled:

@@ -238,13 +238,6 @@ def main() -> int:
     logger.info("Splash screen finished")
     QTimer.singleShot(0, window.start_runtime)
 
-    logger.info("Opening GPS")
-    gps.open()
-    logger.info("Starting video engine")
-    video_engine.start()
-    logger.info("Starting control room link")
-    link.start()
-
     # Field canary: warns to the log if anything ever blocks the UI thread
     # again (all the heavy work is now off it). Silent on a healthy unit.
     ui_watchdog = UiLatencyWatchdog(parent=window, context_provider=window.pipeline_diagnostics_summary)

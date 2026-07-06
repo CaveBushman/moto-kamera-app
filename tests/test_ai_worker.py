@@ -47,6 +47,12 @@ def _frame(marker: int) -> np.ndarray:
     return f
 
 
+def _large_frame(marker: int) -> np.ndarray:
+    f = np.zeros((80, 80, 3), dtype=np.uint8)
+    f[:] = marker
+    return f
+
+
 def test_take_drops_all_but_the_latest_submitted_frame():
     engine = AiEngine(detector=_CountingDetector())
     worker = AiWorker(engine)
@@ -54,7 +60,8 @@ def test_take_drops_all_but_the_latest_submitted_frame():
     worker.submit(_frame(2))
     worker.submit(_frame(3))
     got = worker._take()
-    assert got is not None and int(got[0, 0, 0]) == 3  # only the newest survives
+    assert got is not None
+    assert int(got[0, 0, 0]) == 3  # only the newest survives
     assert worker._take() is None  # and it is consumed exactly once
 
 
@@ -94,6 +101,27 @@ def test_running_worker_emits_detections(qapp):
     assert stats["completed_frames"] >= 1
     assert stats["last_inference_ms"] is not None
     assert stats["worker_util_pct"] is not None
+
+
+def test_worker_downscales_inference_frame_and_remaps_detections(qapp):
+    detector = _CountingDetector()
+    engine = AiEngine(detector=detector)
+    engine.enabled = True
+    worker = AiWorker(engine, max_input_width=40)
+    received: list = []
+    worker.detections_ready.connect(received.append)
+    worker.start()
+    try:
+        worker.submit(_large_frame(9))
+        _spin_until(qapp, lambda: len(received) >= 1, timeout_s=2.0)
+    finally:
+        worker.stop()
+
+    assert detector.calls == 1
+    det = received[-1][0]
+    assert det.x == 18
+    assert det.w == 20
+    assert worker.stats()["max_input_width"] == 40
 
 
 def test_inference_exception_is_swallowed(qapp):

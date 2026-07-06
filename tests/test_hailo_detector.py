@@ -12,6 +12,7 @@ from motocam.ai.hailo_detector import (
     build_detector,
     letterbox,
     parse_nms_output,
+    resolve_hef_path,
     unletterbox_box,
 )
 
@@ -83,10 +84,18 @@ def test_parse_nms_output_tolerates_empty_and_ragged():
 def test_build_detector_falls_back_to_null_without_hailo_type():
     detector = build_detector({"ai": {"type": "mock"}})
     assert isinstance(detector, NullDetector)
+    assert detector.source == "null_disabled"
 
 
-def test_build_detector_null_when_hailo_requested_but_runtime_missing():
-    # On this dev machine hailo_platform isn't installed, so even
-    # ai.type=hailo must degrade to NullDetector rather than raise.
+def test_build_detector_reports_missing_hailo_model():
     detector = build_detector({"ai": {"type": "hailo", "model": "/nonexistent.hef"}})
     assert isinstance(detector, NullDetector)
+    assert detector.source == "null_model"
+
+
+def test_resolve_hef_path_prefers_config_directory(tmp_path):
+    model = tmp_path / "models" / "race.hef"
+    model.parent.mkdir()
+    model.write_bytes(b"hef")
+
+    assert resolve_hef_path("models/race.hef", tmp_path) == str(model)

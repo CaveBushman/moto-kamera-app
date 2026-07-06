@@ -51,10 +51,11 @@ def test_settings_dialog_emits_ble_joystick_timeout():
     emitted: list[dict] = []
     dialog.gimbal_apply_requested.connect(emitted.append)
 
-    dialog.set_gimbal_values({"connection": "ble", "ble_velocity_timeout_s": 0.09})
+    dialog.set_gimbal_values({"connection": "ble", "ble_velocity_timeout_s": 0.09, "ble_notify_stale_s": 4.5})
     dialog._emit_gimbal_apply()
 
     assert emitted[-1]["ble_velocity_timeout_s"] == 0.09
+    assert emitted[-1]["ble_notify_stale_s"] == 4.5
 
 
 def test_settings_dialog_uses_full_screen_scroll_layout():

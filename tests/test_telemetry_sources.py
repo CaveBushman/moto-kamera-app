@@ -6,6 +6,8 @@ def test_source_value_display_compacts_fallbacks():
     assert source_value_display("synthetic") == "SYN"
     assert source_value_display("mock") == "MOCK"
     assert source_value_display("null") == "NULL"
+    assert source_value_display("null_model") == "NO HEF"
+    assert source_value_display("null_runtime") == "NO HAILO"
 
 
 def test_source_value_display_preserves_real_backend_identity():
@@ -16,5 +18,6 @@ def test_source_value_display_preserves_real_backend_identity():
 def test_is_fallback_source():
     assert is_fallback_source("simulated")
     assert is_fallback_source("unknown")
+    assert is_fallback_source("null_model")
     assert not is_fallback_source("real")
     assert not is_fallback_source("hailo")

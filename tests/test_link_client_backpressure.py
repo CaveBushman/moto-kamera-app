@@ -129,3 +129,26 @@ async def _log_event_burst_case():
     await first_task
 
     assert [item.payload["message"] for item in sent] == ["one", "two", "three"]
+
+
+def test_log_event_queue_is_bounded_under_backpressure():
+    asyncio.run(_log_event_queue_bound_case())
+
+
+async def _log_event_queue_bound_case():
+    client = LinkClient("ws://control-room", "moto-1")
+    release = asyncio.Event()
+
+    async def fake_send(_envelope):
+        await release.wait()
+
+    client._send = fake_send  # type: ignore[method-assign]
+    client.send_log_event("INFO", "first", "motocam.test")
+    await asyncio.sleep(0)
+    for index in range(250):
+        client.send_log_event("INFO", f"msg-{index}", "motocam.test")
+
+    assert len(client._log_queue) == 200
+    assert client._log_queue[0].payload["message"] == "msg-50"
+    release.set()
+    await client._log_send_task

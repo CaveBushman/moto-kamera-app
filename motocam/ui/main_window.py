@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
 from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
@@ -47,7 +46,7 @@ from motocam.ui.widgets.settings_dialog import ISO_VALUES, SettingsDialog
 from motocam.ui.widgets.stage_banner import StageBanner
 from motocam.ui.widgets.top_bar import TopBar
 from motocam.video.video_engine import VideoEngine
-from motocam.video.preview_relay import preview_interval_s, preview_jpeg_quality, scaled_preview_size
+from motocam.video.preview_relay import PreviewRelayEncoder, preview_interval_s, preview_jpeg_quality
 from motocam.watchdog.health import HealthMonitor
 
 logger = logging.getLogger("motocam.ui")
@@ -130,7 +129,11 @@ class MainWindow(QMainWindow):
         # Hailo wait must never sit on the UI thread's frame callback, or a
         # single stalled inference freezes the whole display. The UI thread
         # only ever reads the most recent detections this worker produced.
-        self.ai_worker = AiWorker(self.ai_engine, max_fps=float(ai_cfg.get("max_fps", 12.0)))
+        self.ai_worker = AiWorker(
+            self.ai_engine,
+            max_fps=float(ai_cfg.get("max_fps", 12.0)),
+            max_input_width=int(ai_cfg.get("max_input_width", 960) or 0),
+        )
         self._latest_detections: list = []
         self.pid = GimbalPid(
             dead_zone_x=30, dead_zone_y=25,
@@ -143,6 +146,11 @@ class MainWindow(QMainWindow):
         self._preview_bytes_accum = 0
         self._preview_bitrate_kbps: float | None = None
         self._preview_resolution: str | None = None
+        self._preview_encoder = PreviewRelayEncoder(
+            max_width=self._preview_max_width,
+            jpeg_quality=self._preview_jpeg_quality,
+            parent=self,
+        )
         self._camera_refresh_task: asyncio.Task | None = None
         self._gimbal_refresh_task: asyncio.Task | None = None
         self._gimbal_connect_task: asyncio.Task | None = None
@@ -258,6 +266,7 @@ class MainWindow(QMainWindow):
             int(self.pid.pan.dead_zone), int(self.pid.tilt.dead_zone),
             self.pid.pan.max_speed, self.pid.tilt.max_speed,
             self.ai_worker.max_fps,
+            self.ai_worker.max_input_width,
         )
         self._settings.set_safety_values(self._ride_lock_enabled, self._ride_lock_speed_kmh)
         self._settings.exec()
@@ -268,6 +277,7 @@ class MainWindow(QMainWindow):
         self.video_engine.fps_updated.connect(self._on_fps)
         self.video_engine.status_changed.connect(self._on_video_status)
         self.ai_worker.detections_ready.connect(self._on_detections)
+        self._preview_encoder.encoded.connect(self._on_preview_encoded)
 
         self.preview.tapped.connect(self._on_tap)
         self.preview.cancel_track_requested.connect(self._on_cancel_track)
@@ -304,6 +314,7 @@ class MainWindow(QMainWindow):
         self._settings.dead_zone_changed.connect(self._on_dead_zone_changed)
         self._settings.max_speed_changed.connect(self._on_max_speed_changed)
         self._settings.ai_max_fps_changed.connect(self._on_ai_max_fps_changed)
+        self._settings.ai_max_input_width_changed.connect(self._on_ai_max_input_width_changed)
 
         self._settings.connection_apply_requested.connect(self._on_connection_apply)
         self._settings.camera_apply_requested.connect(self._on_camera_address_apply)
@@ -428,6 +439,7 @@ class MainWindow(QMainWindow):
 
     def _start_timers(self) -> None:
         self.ai_worker.start()
+        self._preview_encoder.start()
         self.tracker.start()
 
         self._control_timer = QTimer(self)
@@ -515,18 +527,7 @@ class MainWindow(QMainWindow):
             if now - self._last_preview_sent_at < self._preview_interval_s:
                 return
             self._last_preview_sent_at = now
-            relay_frame = self._make_preview_relay_frame(frame)
-            relay_h, relay_w = relay_frame.shape[:2]
-            ok, buf = cv2.imencode(
-                ".jpg", relay_frame, [cv2.IMWRITE_JPEG_QUALITY, self._preview_jpeg_quality]
-            )
-            if ok:
-                self.link.send_preview_frame(buf.tobytes())
-                # Real measured bandwidth of the low-fps preview relay to
-                # the control room -- not the camera's own recording bitrate,
-                # see CameraTelemetry.preview_bitrate_kbps docstring.
-                self._preview_bytes_accum += buf.nbytes
-                self._preview_resolution = f"{relay_w}x{relay_h}"
+            self._preview_encoder.submit(frame)
 
     def _on_detections(self, detections: list) -> None:
         """Latest detections from the off-thread AI worker (queued signal)."""
@@ -535,12 +536,15 @@ class MainWindow(QMainWindow):
         # box -- keeps a specific rider through occlusion in a bunch.
         self.tracker.update_detections(detections)
 
-    def _make_preview_relay_frame(self, frame: np.ndarray) -> np.ndarray:
-        h, w = frame.shape[:2]
-        target_w, target_h = scaled_preview_size(w, h, self._preview_max_width)
-        if (target_w, target_h) == (w, h):
-            return frame
-        return cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+    def _on_preview_encoded(self, jpeg_bytes: bytes, width: int, height: int, byte_count: int) -> None:
+        if not self._preview_streaming:
+            return
+        self.link.send_preview_frame(jpeg_bytes)
+        # Real measured bandwidth of the low-fps preview relay to the
+        # control room -- not the camera's own recording bitrate, see
+        # CameraTelemetry.preview_bitrate_kbps docstring.
+        self._preview_bytes_accum += byte_count
+        self._preview_resolution = f"{width}x{height}"
 
     def _pick_target_detection(self, detections):
         """Highest-confidence detection whose class matches the configured
@@ -779,6 +783,7 @@ class MainWindow(QMainWindow):
                 state=self.tracker.state.value,
                 inference_fps=self.ai_engine.detector.fps,
                 max_fps=float(ai_stats["max_fps"] or 0.0),
+                max_input_width=int(ai_stats["max_input_width"] or 0),
                 worker_util_pct=ai_stats["worker_util_pct"],
                 last_inference_ms=ai_stats["last_inference_ms"],
                 dropped_frames=int(ai_stats["dropped_frames"] or 0),
@@ -881,6 +886,11 @@ class MainWindow(QMainWindow):
     def _on_ai_max_fps_changed(self, max_fps: float) -> None:
         self.ai_worker.set_max_fps(max_fps)
         self._config.setdefault("ai", {})["max_fps"] = max_fps
+        self._save_config()
+
+    def _on_ai_max_input_width_changed(self, max_input_width: int) -> None:
+        self.ai_worker.set_max_input_width(max_input_width)
+        self._config.setdefault("ai", {})["max_input_width"] = max_input_width
         self._save_config()
 
     def _on_connection_apply(self, unit_id: str, control_room_url: str) -> None:
@@ -1072,6 +1082,10 @@ class MainWindow(QMainWindow):
             self.ai_worker.stop()
         except Exception as exc:  # noqa: BLE001
             logger.debug("ai worker stop failed: %s", exc)
+        try:
+            self._preview_encoder.stop()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("preview encoder stop failed: %s", exc)
         try:
             self.tracker.stop()
         except Exception as exc:  # noqa: BLE001

@@ -9,6 +9,7 @@ ai:
   model: models/yolov8n.hef
   confidence: 0.35
   max_fps: 15.0
+  max_input_width: 960
   infer_timeout_ms: 500
   target_class: bicycle
   labels: null
@@ -21,6 +22,7 @@ gimbal:
   ble_tx_char_uuid: null
   ble_rx_char_uuid: null
   ble_velocity_timeout_s: 0.15
+  ble_notify_stale_s: 3.0
   can_channel: can0
   can_bitrate: 1000000
   uart_device: /dev/ttyAMA0

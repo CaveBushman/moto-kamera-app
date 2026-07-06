@@ -42,9 +42,9 @@ class Detector(Protocol):
 
 class NullDetector:
     """Placeholder used until a HailoDetector is implemented for the AI HAT+."""
-    source = "null"
 
-    def __init__(self):
+    def __init__(self, source: str = "null"):
+        self.source = source
         self._warned = False
 
     def infer(self, frame: np.ndarray) -> list[Detection]:

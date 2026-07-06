@@ -74,6 +74,7 @@ class AiTelemetry:
     target_id: int | None = None
     inference_fps: float = 0.0
     max_fps: float | None = None
+    max_input_width: int | None = None
     worker_util_pct: float | None = None
     last_inference_ms: float | None = None
     dropped_frames: int = 0

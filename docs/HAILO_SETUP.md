@@ -1,9 +1,10 @@
 # Getting Hailo running (Raspberry Pi AI HAT+)
 
-The status bar shows **AI NULL** whenever the app is running the
-`NullDetector` — i.e. it could not build a real Hailo detector, so only
-tap-to-select tracking works and FULL AI can't auto-acquire. Physically
-plugging in the AI HAT+ is **not** enough; three things must all be true:
+The status bar shows **AI NO HEF**, **AI NO HAILO**, **AI AI ERR** or
+**AI NULL** whenever the app is running the `NullDetector` — i.e. it
+could not build a real Hailo detector, so only tap-to-select tracking
+works and FULL AI can't auto-acquire. Physically plugging in the AI HAT+
+is **not** enough; three things must all be true:
 
 1. **Driver + runtime** installed (`hailortcli`, kernel driver).
 2. **`hailo_platform` Python binding** importable in the *app's* venv.
@@ -54,7 +55,7 @@ Recreate the venv so it can:
 ```bash
 python -m venv --system-site-packages .venv
 source .venv/bin/activate
-pip install -e .
+pip install -r requirements.txt
 python -c "import hailo_platform; print('binding OK')"
 ```
 
@@ -114,7 +115,9 @@ class and the peloton tracker (ByteTrack) maintains stable rider IDs.
 | `hailortcli` not found | runtime not installed | step 1 |
 | `scan` finds no device | not rebooted / HAT not seated | reboot, reseat |
 | `import hailo_platform` fails in venv | venv isolated from system pkg | step 2 |
-| model file not found | no `.hef` at `ai.model` | step 3 |
+| `AI NO HEF` | no `.hef` at `ai.model` | step 3 |
+| `AI NO HAILO` | `hailo_platform` unavailable in the app venv | step 2 |
+| `AI AI ERR` | Hailo initialized but model/runtime failed | check `logs/motocam.jsonl` |
 | AI leaves NULL but FULL AI never locks | `target_class` not in model classes | set `bicycle`/`person` |
 
 The app logs the exact fallback reason — check it:

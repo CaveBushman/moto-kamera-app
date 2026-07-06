@@ -22,17 +22,17 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+CONFIG_PATH = REPO / "config" / "config.yaml"
 
 
 def _load_ai_config() -> dict:
-    cfg_path = REPO / "config" / "config.yaml"
     try:
         import yaml
 
-        with open(cfg_path) as f:
+        with open(CONFIG_PATH) as f:
             return (yaml.safe_load(f) or {}).get("ai", {})
     except Exception as exc:  # noqa: BLE001
-        print(f"  ! could not read {cfg_path}: {exc}")
+        print(f"  ! could not read {CONFIG_PATH}: {exc}")
         return {}
 
 
@@ -47,6 +47,7 @@ def check_binding() -> bool:
         print(f"  [MISS] hailo_platform NOT importable here ({exc})")
         print("         -> sudo apt install hailo-all, and make the venv see it:")
         print("            recreate with `python -m venv --system-site-packages .venv`")
+        print("            then `source .venv/bin/activate && pip install -r requirements.txt`")
         print("            (or pip install the hailort wheel into the venv)")
         return False
 
@@ -85,7 +86,7 @@ def check_model(ai_cfg: dict) -> bool:
         return False
     path = Path(model)
     if not path.is_absolute():
-        path = REPO / path
+        path = CONFIG_PATH.parent / path
     if path.is_file():
         size_mb = path.stat().st_size / 1e6
         print(f"  [ok]   model present: {path} ({size_mb:.1f} MB)")

@@ -47,7 +47,7 @@ else
   echo "  The runtime installs into the system Python; a plain venv can't see it."
   echo "  Recreate the venv with system packages:"
   echo "     python -m venv --system-site-packages .venv"
-  echo "     source .venv/bin/activate && pip install -e ."
+  echo "     source .venv/bin/activate && pip install -r requirements.txt"
 fi
 
 say "4/4  Model (.hef)"

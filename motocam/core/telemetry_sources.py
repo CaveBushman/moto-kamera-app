@@ -7,6 +7,10 @@ SOURCE_VALUE_LABELS = {
     "simulated": "SIM",
     "synthetic": "SYN",
     "null": "NULL",
+    "null_disabled": "OFF",
+    "null_model": "NO HEF",
+    "null_runtime": "NO HAILO",
+    "null_error": "AI ERR",
     "mock": "MOCK",
 }
 
@@ -21,4 +25,5 @@ def source_value_display(value: str | None) -> str:
 
 
 def is_fallback_source(value: str | None) -> bool:
-    return normalise_source(value) in FALLBACK_SOURCE_VALUES
+    normalized = normalise_source(value)
+    return normalized in FALLBACK_SOURCE_VALUES or normalized.startswith("null_")

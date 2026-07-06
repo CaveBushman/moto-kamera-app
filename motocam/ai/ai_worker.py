@@ -28,11 +28,54 @@ from motocam.ai.ai_engine import AiEngine
 logger = logging.getLogger("motocam.ai.worker")
 UTIL_WINDOW_S = 2.0
 
+try:
+    import cv2
+except Exception:  # noqa: BLE001 -- pure numpy fallback keeps tests importable without OpenCV
+    cv2 = None
+
+
+def _resize_for_inference(frame: np.ndarray, max_width: int) -> tuple[np.ndarray, float]:
+    """Return a smaller inference frame plus the scale back to source pixels.
+
+    Hailo models letterbox to their own input size internally. Feeding them
+    a full 1080p frame first just costs CPU/memory bandwidth on the Pi.
+    Downscaling here keeps detector boxes equivalent after remapping while
+    making the UI-to-worker handoff and detector preprocessing cheaper.
+    """
+    if max_width <= 0:
+        return frame, 1.0
+    height, width = frame.shape[:2]
+    if width <= max_width:
+        return frame, 1.0
+    scale = max_width / float(width)
+    target_size = (max_width, max(1, int(round(height * scale))))
+    if cv2 is not None:
+        resized = cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
+    else:
+        ys = np.linspace(0, height - 1, target_size[1]).astype(int)
+        xs = np.linspace(0, width - 1, target_size[0]).astype(int)
+        resized = frame[ys][:, xs]
+    return resized, 1.0 / scale
+
+
+def _scale_detections(detections: list, scale_to_source: float, frame_shape: tuple[int, ...]) -> list:
+    if scale_to_source == 1.0:
+        return detections
+    height, width = frame_shape[:2]
+    scaled = []
+    for det in detections:
+        x = max(0, min(width - 1, int(round(det.x * scale_to_source))))
+        y = max(0, min(height - 1, int(round(det.y * scale_to_source))))
+        w = max(1, min(width - x, int(round(det.w * scale_to_source))))
+        h = max(1, min(height - y, int(round(det.h * scale_to_source))))
+        scaled.append(type(det)(x=x, y=y, w=w, h=h, confidence=det.confidence, class_name=det.class_name))
+    return scaled
+
 
 class AiWorker(QThread):
     detections_ready = pyqtSignal(object)  # list[Detection]
 
-    def __init__(self, ai_engine: AiEngine, max_fps: float = 0.0, parent=None):
+    def __init__(self, ai_engine: AiEngine, max_fps: float = 0.0, max_input_width: int = 960, parent=None):
         super().__init__(parent)
         self._engine = ai_engine
         self._lock = threading.Lock()
@@ -40,6 +83,7 @@ class AiWorker(QThread):
         self._wake = threading.Event()
         self._running = True
         self._max_fps = 0.0
+        self._max_input_width = max(0, int(max_input_width or 0))
         self._min_submit_interval_s = 0.0
         self._last_accept_at = 0.0
         self._submitted_frames = 0
@@ -80,7 +124,7 @@ class AiWorker(QThread):
         with self._lock:
             frame = self._latest
             self._latest = None
-        return frame
+            return frame
 
     def run(self) -> None:  # noqa: D401 -- QThread entry point
         while self._running:
@@ -88,13 +132,17 @@ class AiWorker(QThread):
             if not self._running:
                 break
             self._wake.clear()
-            frame = self._take()
-            if frame is None:
+            item = self._take()
+            if item is None:
                 continue
+            frame = item
             start = time.monotonic()
             failed = False
             try:
-                detections = self._engine.process(frame)
+                inference_frame, scale_to_source = _resize_for_inference(frame, self._max_input_width)
+                detections = self._engine.process(inference_frame)
+                source_shape = frame.shape
+                detections = _scale_detections(detections, scale_to_source, source_shape)
             except Exception as exc:  # noqa: BLE001 -- inference must never kill the loop
                 logger.warning("AI inference failed: %s", exc)
                 detections = []
@@ -113,6 +161,15 @@ class AiWorker(QThread):
         with self._lock:
             return self._max_fps
 
+    def set_max_input_width(self, max_input_width: int) -> None:
+        with self._lock:
+            self._max_input_width = max(0, int(max_input_width or 0))
+
+    @property
+    def max_input_width(self) -> int:
+        with self._lock:
+            return self._max_input_width
+
     def stats(self) -> dict[str, float | int | None]:
         now = time.monotonic()
         with self._lock:
@@ -130,6 +187,7 @@ class AiWorker(QThread):
                 "failed_frames": self._failed_frames,
                 "last_inference_ms": self._last_inference_ms,
                 "worker_util_pct": util,
+                "max_input_width": self._max_input_width,
             }
 
     def _record_inference(self, duration_s: float, failed: bool) -> None:

@@ -23,6 +23,7 @@ logger = logging.getLogger("motocam.network")
 
 RECONNECT_DELAY_S = 3.0
 PING_INTERVAL_S = 5.0
+LOG_QUEUE_MAX = 200
 
 
 class LinkClient(QObject):
@@ -198,6 +199,8 @@ class LinkClient(QObject):
         envelope = make_envelope(MessageType.LOG_EVENT, payload, self.unit_id)
 
         def schedule() -> None:
+            while len(self._log_queue) >= LOG_QUEUE_MAX:
+                self._log_queue.popleft()
             self._log_queue.append(envelope)
             if self._log_send_task is None or self._log_send_task.done():
                 self._log_send_task = asyncio.ensure_future(self._drain_log_queue())

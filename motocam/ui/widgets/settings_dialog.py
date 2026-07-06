@@ -104,6 +104,7 @@ class SettingsDialog(QDialog):
     dead_zone_changed = pyqtSignal(int, int)
     max_speed_changed = pyqtSignal(float, float)
     ai_max_fps_changed = pyqtSignal(float)
+    ai_max_input_width_changed = pyqtSignal(int)
 
     connection_apply_requested = pyqtSignal(str, str)  # (unit_id, control_room_url)
     camera_apply_requested = pyqtSignal(str, int)  # (ip, port)
@@ -543,6 +544,14 @@ class SettingsDialog(QDialog):
         self.ble_velocity_timeout_spin.setValue(0.15)
         form.addRow("BLE joystick timeout", self.ble_velocity_timeout_spin)
 
+        self.ble_notify_stale_spin = QDoubleSpinBox()
+        self.ble_notify_stale_spin.setRange(1.0, 15.0)
+        self.ble_notify_stale_spin.setSingleStep(0.5)
+        self.ble_notify_stale_spin.setDecimals(1)
+        self.ble_notify_stale_spin.setSuffix(" s")
+        self.ble_notify_stale_spin.setValue(3.0)
+        form.addRow("BLE notify stale", self.ble_notify_stale_spin)
+
         self.can_channel_edit = QLineEdit()
         self.can_channel_edit.setPlaceholderText("can0")
         form.addRow("CAN channel", self.can_channel_edit)
@@ -577,6 +586,7 @@ class SettingsDialog(QDialog):
         self.ble_tx_char_uuid_edit.setText(str(cfg.get("ble_tx_char_uuid", "") or ""))
         self.ble_rx_char_uuid_edit.setText(str(cfg.get("ble_rx_char_uuid", "") or ""))
         self.ble_velocity_timeout_spin.setValue(float(cfg.get("ble_velocity_timeout_s", 0.15)))
+        self.ble_notify_stale_spin.setValue(float(cfg.get("ble_notify_stale_s", 3.0)))
         self.can_channel_edit.setText(str(cfg.get("can_channel", "can0")))
         self.uart_device_edit.setText(str(cfg.get("uart_device", "/dev/ttyAMA0")))
         self.uart_baudrate_spin.setValue(int(cfg.get("uart_baudrate", 115200)))
@@ -592,6 +602,7 @@ class SettingsDialog(QDialog):
                 "ble_tx_char_uuid": self._text_or_none(self.ble_tx_char_uuid_edit),
                 "ble_rx_char_uuid": self._text_or_none(self.ble_rx_char_uuid_edit),
                 "ble_velocity_timeout_s": self.ble_velocity_timeout_spin.value(),
+                "ble_notify_stale_s": self.ble_notify_stale_spin.value(),
                 "can_channel": self.can_channel_edit.text().strip() or "can0",
                 "uart_device": self.uart_device_edit.text().strip() or "/dev/ttyAMA0",
                 "uart_baudrate": self.uart_baudrate_spin.value(),
@@ -769,6 +780,13 @@ class SettingsDialog(QDialog):
         self.ai_max_fps_spin.valueChanged.connect(self.ai_max_fps_changed.emit)
         form.addRow("AI max FPS", self.ai_max_fps_spin)
 
+        self.ai_input_width_spin = QSpinBox()
+        self.ai_input_width_spin.setRange(0, 3840)
+        self.ai_input_width_spin.setSingleStep(160)
+        self.ai_input_width_spin.setSuffix(" px")
+        self.ai_input_width_spin.valueChanged.connect(self.ai_max_input_width_changed.emit)
+        form.addRow("AI input width", self.ai_input_width_spin)
+
         self.dead_zone_x_spin = QSpinBox()
         self.dead_zone_x_spin.setRange(0, 200)
         self.dead_zone_x_spin.setSuffix(" px")
@@ -800,11 +818,13 @@ class SettingsDialog(QDialog):
         dead_zone_x: int, dead_zone_y: int,
         max_pan_speed: float, max_tilt_speed: float,
         ai_max_fps: float,
+        ai_max_input_width: int,
     ) -> None:
         self._select(self.target_class_combo, target_class)
         for spin, value in (
             (self.confidence_spin, confidence),
             (self.ai_max_fps_spin, ai_max_fps),
+            (self.ai_input_width_spin, ai_max_input_width),
             (self.dead_zone_x_spin, dead_zone_x),
             (self.dead_zone_y_spin, dead_zone_y),
             (self.max_pan_speed_spin, max_pan_speed),

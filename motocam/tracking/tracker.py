@@ -204,9 +204,18 @@ class TrackingEngine:
         """Hand the newest frame to the worker (drops any older un-processed
         one). Cheap and non-blocking -- safe to call from the UI frame
         callback every frame."""
+        if not self.needs_frame_updates:
+            return
         with self._frame_lock:
             self._frame_latest = frame
         self._wake.set()
+
+    @property
+    def needs_frame_updates(self) -> bool:
+        if self._locked_id is not None:
+            return False
+        with self._lock:
+            return self._tracker is not None
 
     def _take(self) -> np.ndarray | None:
         with self._frame_lock:

@@ -58,6 +58,7 @@ CAN_RECV_ID = 0x222  # verified against the reference implementation
 CAN_BITRATE = 1_000_000
 RECONNECT_MIN_INTERVAL_S = 5.0
 REPLY_TIMEOUT_S = 0.8
+BLE_NOTIFY_STALE_S = 3.0
 # Bounds a single joystick write's wait. A command older than a few hundred
 # milliseconds is already harmful for hand control: waiting behind it is the
 # "rubber band" lag the rider feels. Timeout drops the stale write so the
@@ -296,6 +297,7 @@ class BleTransport:
         self._client: Any | None = None
         self._queue: asyncio.Queue[bytes] | None = None
         self._endpoint: BleEndpoint | None = None
+        self._last_notify_at: float | None = None
 
     @property
     def label(self) -> str:
@@ -332,6 +334,7 @@ class BleTransport:
             rx_char_uuid=self.rx_char_uuid,
         )
         self._queue = asyncio.Queue(maxsize=BLE_NOTIFY_QUEUE_MAX)
+        self._last_notify_at = None
         await self._client.start_notify(self._endpoint.rx_uuid, self._on_notify)
         logger.info(
             "DJI RS 4 Pro BLE connected, write=%s notify=%s response=%s mtu_payload=%d",
@@ -381,6 +384,7 @@ class BleTransport:
         client = self._client
         self._client = None
         self._queue = None
+        self._last_notify_at = None
         endpoint = self._endpoint
         self._endpoint = None
         if client is None:
@@ -443,6 +447,11 @@ class BleTransport:
                 break
         return bytes(out)
 
+    def notification_age_s(self) -> float | None:
+        if self._last_notify_at is None:
+            return None
+        return time.monotonic() - self._last_notify_at
+
     async def _scan_for_device(self, *, locked: bool = False):
         """`locked=True` means the caller (BleTransport.open()) already
         holds _BLE_ADAPTER_LOCK -- go straight to the no-lock raw discovery
@@ -485,6 +494,7 @@ class BleTransport:
             await asyncio.sleep(SERVICE_DISCOVERY_RETRY_S)
 
     def _on_notify(self, _sender, data: bytearray | bytes) -> None:
+        self._last_notify_at = time.monotonic()
         if self._queue is not None:
             try:
                 self._queue.put_nowait(bytes(data))
@@ -605,6 +615,7 @@ class DjiRs4ProBackend(GimbalBackend):
         max_pan_speed: float = 20.0,
         max_tilt_speed: float = 12.0,
         velocity_send_timeout_s: float = VELOCITY_SEND_TIMEOUT_S,
+        notify_stale_s: float = BLE_NOTIFY_STALE_S,
     ) -> None:
         self.transport = transport
         # Needed to normalize deg/s into the DUML joystick's [-1, 1] ratio
@@ -614,6 +625,7 @@ class DjiRs4ProBackend(GimbalBackend):
         self.max_pan_speed = max(1e-6, max_pan_speed)
         self.max_tilt_speed = max(1e-6, max_tilt_speed)
         self.velocity_send_timeout_s = max(0.03, float(velocity_send_timeout_s))
+        self.notify_stale_s = max(1.0, float(notify_stale_s))
         self._connected = False
         self._sequence = 0
         self._assembler = FrameAssembler()
@@ -886,7 +898,36 @@ class DjiRs4ProBackend(GimbalBackend):
             label = getattr(self.transport, "label", self.transport.__class__.__name__)
             logger.warning("Gimbal %s transport disconnected, reconnect will be attempted", label)
             self._connected = False
+            await self._close_after_health_failure()
+            return False
+        if self._protocol == "duml":
+            notify_age = await self._notification_age_s()
+            if notify_age is not None and notify_age > self.notify_stale_s:
+                logger.warning(
+                    "Gimbal BLE notify stream stale for %.1fs, marking disconnected",
+                    notify_age,
+                )
+                self._connected = False
+                await self._close_after_health_failure()
+                return False
         return alive
+
+    async def _notification_age_s(self) -> float | None:
+        age_getter = getattr(self.transport, "notification_age_s", None)
+        if not callable(age_getter):
+            return None
+        try:
+            value = await self._call_transport("notification_age_s")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("BLE notify age check failed: %s", exc)
+            return None
+        return float(value) if value is not None else None
+
+    async def _close_after_health_failure(self) -> None:
+        try:
+            await asyncio.wait_for(self._call_transport("close"), timeout=1.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("gimbal transport close after health failure failed: %s", exc)
 
     async def _drain_duml_telemetry(self) -> None:
         chunk = await self._call_transport("drain")

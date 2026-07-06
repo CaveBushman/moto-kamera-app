@@ -303,6 +303,17 @@ def test_ble_duml_health_check_marks_disconnected_transport_down():
     assert backend.connected is False
 
 
+def test_ble_duml_health_check_marks_stale_notifications_down():
+    transport = DumlTelemetryTransport()
+    transport.is_connected = lambda: True
+    transport.notification_age_s = lambda: 9.0
+    backend = DjiRs4ProBackend(transport, notify_stale_s=3.0)
+    asyncio.run(backend.connect())
+
+    assert asyncio.run(backend.check_connection()) is False
+    assert backend.connected is False
+
+
 def test_ble_duml_go_home_sends_the_recenter_frame():
     # Recenter IS decoded (live-confirmed against real hardware -- gimbal
     # visibly returned to center, see docs/RS4_BLE_FINDINGS.md).

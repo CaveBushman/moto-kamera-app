@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -46,7 +47,7 @@ class VideoEngine(QObject):
         self._lock = threading.Lock()
         self._reopen = False
         self._synthetic = False
-        self._frame_times: list[float] = []
+        self._frame_times: deque[float] = deque()
         self._last_fps_emit_at: float | None = None
         self._t = 0.0
 
@@ -183,7 +184,8 @@ class VideoEngine(QObject):
         now = time.monotonic()
         self._frame_times.append(now)
         cutoff = now - 2.0
-        self._frame_times = [t for t in self._frame_times if t >= cutoff]
+        while self._frame_times and self._frame_times[0] < cutoff:
+            self._frame_times.popleft()
         if len(self._frame_times) >= 2:
             if self._last_fps_emit_at is not None and now - self._last_fps_emit_at < FPS_EMIT_INTERVAL_S:
                 return

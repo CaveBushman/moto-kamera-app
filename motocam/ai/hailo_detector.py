@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -223,17 +224,40 @@ class HailoDetector:
             logger.debug("Hailo configured-model exit failed: %s", exc)
 
 
+def resolve_hef_path(hef_path: str, config_dir: str | Path | None = None) -> str:
+    path = Path(hef_path).expanduser()
+    if path.is_absolute():
+        return str(path)
+    if config_dir is not None:
+        candidate = Path(config_dir).expanduser() / path
+        if candidate.exists():
+            return str(candidate)
+    return str(path)
+
+
 def build_detector(cfg: dict):
     """Build the configured detector, or NullDetector on any failure.
     ai.type: "hailo" enables real inference; anything else = NullDetector."""
     ai_cfg = cfg.get("ai", {})
     if str(ai_cfg.get("type", "")).lower() != "hailo":
-        return NullDetector()
+        return NullDetector("null_disabled")
     hef_path = ai_cfg.get("model") or ai_cfg.get("hef_path")
     if not hef_path:
         logger.warning("ai.type=hailo but no ai.model HEF path set -- using NullDetector "
                        "(run scripts/hailo_check.py; see docs/HAILO_SETUP.md)")
-        return NullDetector()
+        return NullDetector("null_model")
+    hef_path = resolve_hef_path(str(hef_path), cfg.get("_config_dir"))
+    if not Path(hef_path).exists():
+        logger.warning(
+            "Hailo HEF model not found at %s -- using NullDetector "
+            "(run scripts/setup_hailo.sh or set ai.model to an absolute .hef path)",
+            hef_path,
+        )
+        return NullDetector("null_model")
+    if not HAILO_AVAILABLE:
+        logger.warning("hailo_platform runtime not installed -- using NullDetector "
+                       "(install HailoRT on the Ri5 / AI HAT+)")
+        return NullDetector("null_runtime")
     labels = ai_cfg.get("labels")
     timeout_ms = int(ai_cfg.get("infer_timeout_ms", 500))
     try:
@@ -241,4 +265,4 @@ def build_detector(cfg: dict):
     except Exception as exc:  # noqa: BLE001 -- missing runtime/HEF must degrade, not crash
         logger.warning("Hailo detector unavailable (%s) -- using NullDetector, tap-to-select "
                        "still works (run scripts/hailo_check.py; see docs/HAILO_SETUP.md)", exc)
-        return NullDetector()
+        return NullDetector("null_error")

@@ -140,6 +140,7 @@ def main() -> int:
 
     config_path = resolve_config_path(args.config)
     cfg = load_config(config_path)
+    cfg["_config_dir"] = str(config_path.parent)
     setup_logging(cfg.get("logging", {}).get("dir", "logs"))
     logger = logging.getLogger("motocam.main")
     install_crash_guard(logging.getLogger("motocam"))

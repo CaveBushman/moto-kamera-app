@@ -15,6 +15,7 @@ def test_initial_state_is_idle_with_no_bbox():
     engine = TrackingEngine()
     assert engine.state == TargetState.IDLE
     assert engine.bbox is None
+    assert engine.needs_frame_updates is False
 
 
 def test_select_at_locks_a_target():
@@ -22,6 +23,7 @@ def test_select_at_locks_a_target():
     engine.select_at(FRAME, 320, 240)
     assert engine.state == TargetState.LOCKED
     assert engine.bbox is not None
+    assert engine.needs_frame_updates is True
     _, _, w, h = engine.bbox
     assert (w, h) == (120, 120)  # default box_size
 
@@ -120,10 +122,17 @@ def test_submit_keeps_only_the_latest_frame():
     engine = TrackingEngine()
     f1 = np.zeros((4, 4, 3), np.uint8)
     f2 = np.ones((4, 4, 3), np.uint8)
+    engine.select_at(FRAME, 320, 240)
     engine.submit(f1)
     engine.submit(f2)
     assert engine._take() is f2  # older frame dropped
     assert engine._take() is None  # consumed once
+
+
+def test_submit_ignores_idle_tracker_to_avoid_cpu_wakeups():
+    engine = TrackingEngine()
+    engine.submit(FRAME)
+    assert engine._take() is None
 
 
 def test_worker_thread_runs_update_and_publishes_bbox():

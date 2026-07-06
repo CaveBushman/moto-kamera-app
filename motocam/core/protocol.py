@@ -86,6 +86,11 @@ class GimbalTelemetry:
     pan_deg: float = 0.0
     tilt_deg: float = 0.0
     roll_deg: float = 0.0
+    velocity_write_ms_avg: float | None = None
+    velocity_write_ms_max: float | None = None
+    velocity_call_gap_ms_avg: float | None = None
+    velocity_call_gap_ms_max: float | None = None
+    velocity_timeouts: int = 0
 
 
 @dataclass

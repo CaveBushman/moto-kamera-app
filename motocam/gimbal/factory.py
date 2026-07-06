@@ -53,6 +53,7 @@ def build_gimbal_backend(gimbal_cfg: dict[str, Any]) -> GimbalBackend:
                 transport,
                 max_pan_speed=float(gimbal_cfg.get("max_pan_speed", 20.0)),
                 max_tilt_speed=float(gimbal_cfg.get("max_tilt_speed", 12.0)),
+                velocity_send_timeout_s=float(gimbal_cfg.get("ble_velocity_timeout_s", 0.15)),
             )
         except RuntimeError as exc:
             logger.warning("R SDK transport unavailable (%s) -- falling back to mock gimbal", exc)

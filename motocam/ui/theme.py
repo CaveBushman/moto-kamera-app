@@ -299,18 +299,27 @@ QScrollArea {{
     background: transparent;
 }}
 
+QScrollArea#settingsScroll {{
+    background: transparent;
+}}
+
 QScrollBar:vertical {{
     background: transparent;
-    width: 12px;
+    width: 18px;
+    margin: 2px 0px 2px 0px;
 }}
 
 QScrollBar::handle:vertical {{
-    background: rgba(255, 255, 255, 50);
-    border-radius: 6px;
-    min-height: 24px;
+    background: rgba(255, 255, 255, 72);
+    border-radius: 9px;
+    min-height: 56px;
 }}
 
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0px;
+}}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: transparent;
 }}
 """

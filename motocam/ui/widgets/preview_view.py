@@ -5,6 +5,8 @@ on the video itself -- that way the operator always knows where the
 control lives without hunting for it."""
 from __future__ import annotations
 
+import time
+
 import numpy as np
 from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap
@@ -25,6 +27,7 @@ CONTROL_HUD_GAP = 16
 # Comfortably covers the compact joystick (156px) + its bottom margin +
 # CONTROL_HUD_GAP -- the floor the HUD is never allowed to shrink below.
 MIN_CONTROL_ZONE = 200
+DEFAULT_MAX_RENDER_FPS = 20.0
 
 
 class PreviewView(QFrame):
@@ -131,11 +134,30 @@ class PreviewView(QFrame):
         self._bbox: tuple[int, int, int, int] | None = None
         self._target_state = "idle"
         self._last_pixmap: QPixmap | None = None
+        self._min_render_interval_s = 1.0 / DEFAULT_MAX_RENDER_FPS
+        self._last_render_at = 0.0
+        self._scale_mode = Qt.TransformationMode.FastTransformation
 
         self._press_pos: QPoint | None = None
         self._recording = False
         self._link_connected = False
         self._preview_streaming = False
+
+    def set_render_options(self, *, max_fps: float | int | None, smooth_scaling: bool = False) -> None:
+        """Bound expensive Qt paint work on the touchscreen. Capture,
+        tracking and AI still see every frame; this only limits how often
+        the live image is converted/scaled into a QPixmap for display."""
+        try:
+            fps = float(max_fps)
+        except (TypeError, ValueError):
+            fps = DEFAULT_MAX_RENDER_FPS
+        fps = max(0.0, min(60.0, fps))
+        self._min_render_interval_s = 0.0 if fps <= 0 else 1.0 / fps
+        self._scale_mode = (
+            Qt.TransformationMode.SmoothTransformation
+            if smooth_scaling
+            else Qt.TransformationMode.FastTransformation
+        )
 
     def set_controls_scale(self, scale: float) -> None:
         """Enlarge the PTT/zoom/joystick thumb controls (display.controls_scale)
@@ -284,6 +306,11 @@ class PreviewView(QFrame):
     def update_frame(self, frame: np.ndarray) -> None:
         h, w = frame.shape[:2]
         self._frame_size = (w, h)
+        now = time.monotonic()
+        if self._min_render_interval_s > 0 and self._last_render_at:
+            if now - self._last_render_at < self._min_render_interval_s:
+                return
+        self._last_render_at = now
 
         image = QImage(frame.data, w, h, frame.strides[0], QImage.Format.Format_BGR888)
         # Keep the clean, unannotated full-res pixmap: the tracking rectangle
@@ -302,7 +329,7 @@ class PreviewView(QFrame):
         scaled = self._last_pixmap.scaled(
             self._image_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            self._scale_mode,
         )
         if self._bbox is not None and self._frame_size is not None:
             fw, fh = self._frame_size

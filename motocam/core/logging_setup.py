@@ -7,6 +7,7 @@ import logging.handlers
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 
 class JsonlFormatter(logging.Formatter):
@@ -41,6 +42,33 @@ def setup_logging(log_dir: str | Path = "logs", level: int = logging.INFO) -> lo
     root.addHandler(console_handler)
 
     return root
+
+
+class ControlRoomLogHandler(logging.Handler):
+    def __init__(self, link: Any, level: int = logging.NOTSET):
+        super().__init__(level)
+        self.link = link
+        self._exception_formatter = logging.Formatter()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+            if record.exc_info:
+                message = f"{message}\n{self._exception_formatter.formatException(record.exc_info)}"
+            self.link.send_log_event(record.levelname, message, record.name)
+        except Exception:
+            # Logging handlers must never destabilize the live moto app.
+            self.handleError(record)
+
+
+def install_control_room_log_forwarder(logger: logging.Logger, link: Any) -> ControlRoomLogHandler:
+    for handler in logger.handlers:
+        if isinstance(handler, ControlRoomLogHandler):
+            handler.link = link
+            return handler
+    handler = ControlRoomLogHandler(link)
+    logger.addHandler(handler)
+    return handler
 
 
 def install_crash_guard(logger: logging.Logger) -> None:

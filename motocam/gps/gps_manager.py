@@ -11,7 +11,7 @@ import logging
 import math
 import threading
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pynmea2
@@ -21,6 +21,8 @@ from motocam.core.protocol import GpsTelemetry
 
 logger = logging.getLogger("motocam.gps")
 AUTO_DEVICE = "auto"
+AUTO_BAUDRATE = "auto"
+NMEA_BAUDRATES = (9600, 38400, 115200)
 AUTO_PATTERNS = (
     "/dev/serial/by-id/*",
     "/dev/ttyACM*",
@@ -29,8 +31,14 @@ AUTO_PATTERNS = (
 NMEA_PREFIXES = ("$GP", "$GN", "$GL", "$GA", "$GB", "$BD", "$GQ")
 
 
+@dataclass(frozen=True)
+class DetectedGpsDevice:
+    device: str
+    baudrate: int
+
+
 class GpsManager:
-    def __init__(self, device: str | None = None, baudrate: int = 9600):
+    def __init__(self, device: str | None = None, baudrate: int | str = 9600):
         self.device = device
         self.baudrate = baudrate
         self._serial: serial.Serial | None = None
@@ -56,13 +64,22 @@ class GpsManager:
                 self._simulated = True
                 logger.warning("No NMEA GPS device detected, using simulated fix")
                 return
-            self.device = detected
+            self.device = detected.device
+            self.baudrate = detected.baudrate
+        elif str(self.baudrate).lower() == AUTO_BAUDRATE:
+            detected_baudrate = self._detect_baudrate(str(self.device))
+            if detected_baudrate is None:
+                self._simulated = True
+                logger.warning("No NMEA stream detected on GPS device %s, using simulated fix", self.device)
+                return
+            self.baudrate = detected_baudrate
         try:
-            self._serial = serial.Serial(self.device, self.baudrate, timeout=0.2)
+            open_baudrate = int(self.baudrate)
+            self._serial = serial.Serial(self.device, open_baudrate, timeout=0.2)
             self._simulated = False
-            logger.info("GPS serial opened on %s", self.device)
+            logger.info("GPS serial opened on %s @ %d", self.device, open_baudrate)
             self._start_reader()
-        except (serial.SerialException, FileNotFoundError) as exc:
+        except (TypeError, ValueError, serial.SerialException, FileNotFoundError) as exc:
             logger.warning("GPS device %s unavailable (%s), using simulated fix", self.device, exc)
             self._serial = None
             self._simulated = True
@@ -140,11 +157,12 @@ class GpsManager:
             if msg.spd_over_grnd_kmph is not None:
                 self._acc.speed_kmh = float(msg.spd_over_grnd_kmph)
 
-    def _detect_device(self) -> str | None:
+    def _detect_device(self) -> DetectedGpsDevice | None:
         for device in self._candidate_devices():
-            if self._looks_like_nmea(device):
-                logger.info("Auto-detected GPS NMEA device on %s", device)
-                return device
+            baudrate = self._detect_baudrate(device)
+            if baudrate is not None:
+                logger.info("Auto-detected GPS NMEA device on %s @ %d", device, baudrate)
+                return DetectedGpsDevice(device=device, baudrate=baudrate)
         return None
 
     def _candidate_devices(self) -> list[str]:
@@ -158,9 +176,27 @@ class GpsManager:
                     devices.append(text)
         return devices
 
-    def _looks_like_nmea(self, device: str) -> bool:
+    def _candidate_baudrates(self) -> list[int]:
+        baudrates: list[int] = []
+        if str(self.baudrate).lower() != AUTO_BAUDRATE:
+            try:
+                baudrates.append(int(self.baudrate))
+            except (TypeError, ValueError):
+                logger.warning("Invalid GPS baudrate %r, falling back to auto scan", self.baudrate)
+        for baudrate in NMEA_BAUDRATES:
+            if baudrate not in baudrates:
+                baudrates.append(baudrate)
+        return baudrates
+
+    def _detect_baudrate(self, device: str) -> int | None:
+        for baudrate in self._candidate_baudrates():
+            if self._looks_like_nmea(device, baudrate):
+                return baudrate
+        return None
+
+    def _looks_like_nmea(self, device: str, baudrate: int) -> bool:
         try:
-            with serial.Serial(device, self.baudrate, timeout=0.2) as probe:
+            with serial.Serial(device, baudrate, timeout=0.2) as probe:
                 deadline = time.monotonic() + 1.5
                 while time.monotonic() < deadline:
                     line = probe.readline().decode("ascii", errors="ignore").strip()

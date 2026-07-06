@@ -26,6 +26,8 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger("motocam.video")
 
+FPS_EMIT_INTERVAL_S = 0.5
+
 
 class VideoEngine(QObject):
     frame_ready = pyqtSignal(np.ndarray)
@@ -45,6 +47,7 @@ class VideoEngine(QObject):
         self._reopen = False
         self._synthetic = False
         self._frame_times: list[float] = []
+        self._last_fps_emit_at: float | None = None
         self._t = 0.0
 
     def start(self) -> None:
@@ -182,7 +185,10 @@ class VideoEngine(QObject):
         cutoff = now - 2.0
         self._frame_times = [t for t in self._frame_times if t >= cutoff]
         if len(self._frame_times) >= 2:
+            if self._last_fps_emit_at is not None and now - self._last_fps_emit_at < FPS_EMIT_INTERVAL_S:
+                return
             span = self._frame_times[-1] - self._frame_times[0]
             if span > 0:
                 fps = (len(self._frame_times) - 1) / span
+                self._last_fps_emit_at = now
                 self.fps_updated.emit(fps)

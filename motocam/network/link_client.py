@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import deque
 import logging
 import time
 
@@ -36,17 +37,24 @@ class LinkClient(QObject):
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._connected = False
         self._task: asyncio.Task | None = None
+        try:
+            self._loop: asyncio.AbstractEventLoop | None = asyncio.get_event_loop()
+        except RuntimeError:
+            self._loop = None
         self._last_ping_sent: float | None = None
         self._telemetry_send_task: asyncio.Task | None = None
         self._pending_telemetry: Telemetry | None = None
         self._preview_send_task: asyncio.Task | None = None
         self._pending_preview_jpeg: bytes | None = None
+        self._log_queue: deque[Envelope] = deque()
+        self._log_send_task: asyncio.Task | None = None
 
     @property
     def connected(self) -> bool:
         return self._connected
 
     def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         self._task = asyncio.ensure_future(self._run_forever())
 
     async def stop(self) -> None:
@@ -172,17 +180,44 @@ class LinkClient(QObject):
             logger.warning("%s failed: %s", label, exc)
 
     def _cancel_send_tasks(self) -> None:
-        for task in (self._telemetry_send_task, self._preview_send_task):
+        for task in (self._telemetry_send_task, self._preview_send_task, self._log_send_task):
             if task is not None and not task.done():
                 task.cancel()
         self._telemetry_send_task = None
         self._pending_telemetry = None
         self._preview_send_task = None
         self._pending_preview_jpeg = None
+        self._log_send_task = None
+        self._log_queue.clear()
 
     def send_log_event(self, level: str, message: str, module: str = "") -> None:
-        payload = {"level": level, "message": message, "module": module}
-        self._schedule_send(make_envelope(MessageType.LOG_EVENT, payload, self.unit_id), "log send")
+        payload = {"level": level, "message": message, "module": module, "ts": time.time()}
+        envelope = make_envelope(MessageType.LOG_EVENT, payload, self.unit_id)
+
+        def schedule() -> None:
+            self._log_queue.append(envelope)
+            if self._log_send_task is None or self._log_send_task.done():
+                self._log_send_task = asyncio.ensure_future(self._drain_log_queue())
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if self._loop is None and running_loop is None:
+            return
+        if self._loop is not None and running_loop is not self._loop:
+            self._loop.call_soon_threadsafe(schedule)
+            return
+        schedule()
+
+    async def _drain_log_queue(self) -> None:
+        while self._log_queue:
+            envelope = self._log_queue.popleft()
+            try:
+                await self._send(envelope)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("log send failed: %s", exc)
+                return
 
     def send_ping(self) -> None:
         self._last_ping_sent = time.time()

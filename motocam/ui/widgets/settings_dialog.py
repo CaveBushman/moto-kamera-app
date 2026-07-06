@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
+    QAbstractScrollArea,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -23,6 +24,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QScroller,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -48,6 +50,12 @@ GIMBAL_CONNECTIONS = [
     ("DJI RS4 Pro BLE", "ble"),
     ("DJI R SDK CAN", "can"),
     ("DJI R SDK UART", "uart"),
+]
+GPS_BAUDRATES = [
+    ("Auto", "auto"),
+    ("9600", 9600),
+    ("38400", 38400),
+    ("115200", 115200),
 ]
 DEFAULT_CONTROL_ROOM_PORT = 8765
 DEFAULT_CAMERA_REST_PORT = 9993
@@ -99,6 +107,7 @@ class SettingsDialog(QDialog):
 
     connection_apply_requested = pyqtSignal(str, str)  # (unit_id, control_room_url)
     camera_apply_requested = pyqtSignal(str, int)  # (ip, port)
+    gps_apply_requested = pyqtSignal(str, object)  # (device, baudrate)
     audio_apply_requested = pyqtSignal(object, object)  # input_device, output_device
     video_device_apply_requested = pyqtSignal(object)  # device (int index or /dev/videoN path)
     gimbal_apply_requested = pyqtSignal(object)  # gimbal config dict
@@ -109,13 +118,16 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(640, 820)
+        self.resize(1024, 720)
+        self.setMinimumSize(0, 0)
         self._device_scan_worker: DeviceScanWorker | None = None
         self._pending_video_device: int | str | None = None
         self._pending_input_device: int | str | None = None
         self._pending_output_device: int | str | None = None
 
         outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(16, 12, 16, 12)
+        outer_layout.setSpacing(10)
 
         # Top toolbar: HIDE KEYBOARD lives HERE, at the top, so it's always
         # reachable above the Pi on-screen keyboard -- which covers the
@@ -123,6 +135,7 @@ class SettingsDialog(QDialog):
         # (the very button you need to dismiss the keyboard). Close sits
         # here too for the same reason.
         toolbar = QHBoxLayout()
+        toolbar.setSpacing(10)
         hide_kb_btn = QPushButton("⌨  HIDE KEYBOARD")
         hide_kb_btn.clicked.connect(self.hide_keyboard)
         toolbar.addWidget(hide_kb_btn)
@@ -132,21 +145,33 @@ class SettingsDialog(QDialog):
         toolbar.addWidget(top_close_btn)
         outer_layout.addLayout(toolbar)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("settingsScroll")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setSizeAdjustPolicy(QAbstractScrollArea.SizeAdjustPolicy.AdjustIgnored)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.verticalScrollBar().setSingleStep(32)
+        self.scroll_area.verticalScrollBar().setPageStep(260)
+        QScroller.grabGesture(self.scroll_area.viewport(), QScroller.ScrollerGestureType.TouchGesture)
         content = QWidget()
+        content.setObjectName("settingsContent")
         layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
         layout.addWidget(self._build_connection_group())
+        layout.addWidget(self._build_gps_group())
         layout.addWidget(self._build_video_group())
         layout.addWidget(self._build_audio_group())
         layout.addWidget(self._build_gimbal_group())
         layout.addWidget(self._build_camera_group())
         layout.addWidget(self._build_tracking_group())
         layout.addWidget(self._build_safety_group())
-        scroll.setWidget(content)
-        outer_layout.addWidget(scroll)
+        layout.addStretch(1)
+        self.scroll_area.setWidget(content)
+        outer_layout.addWidget(self.scroll_area, stretch=1)
 
         footer = QHBoxLayout()
+        footer.setSpacing(10)
         # Fullscreen kiosk has no window title bar / close button, so the
         # only way out of the app lives here. Confirmed so an accidental
         # tap mid-operation can't kill the live feed.
@@ -182,12 +207,8 @@ class SettingsDialog(QDialog):
         if screen is None:
             return
         avail = screen.availableGeometry()
-        max_h = int(avail.height() * 0.95)
-        if self.height() > max_h:
-            self.resize(self.width(), max_h)
-        # top-centered
-        x = avail.x() + (avail.width() - self.width()) // 2
-        self.move(max(avail.x(), x), avail.y() + 8)
+        self.setGeometry(avail)
+        self.scroll_area.verticalScrollBar().setPageStep(max(160, int(avail.height() * 0.42)))
 
     def hide_keyboard(self) -> None:
         """Dismiss the OS on-screen keyboard: drop input focus, ask the Qt
@@ -261,9 +282,20 @@ class SettingsDialog(QDialog):
             self.exit_requested.emit()
 
     # -- unit identity & control room link (design doc 6.2, 21) ---------------
+    @staticmethod
+    def _new_form_layout(parent: QWidget | None = None) -> QFormLayout:
+        form = QFormLayout(parent)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        return form
+
     def _build_connection_group(self) -> QGroupBox:
         group = QGroupBox("CONNECTION")
-        form = QFormLayout(group)
+        form = self._new_form_layout(group)
 
         self.unit_id_combo = QComboBox()
         self.unit_id_combo.setEditable(True)
@@ -316,6 +348,50 @@ class SettingsDialog(QDialog):
             host, port = stripped, DEFAULT_CONTROL_ROOM_PORT
         return host, port
 
+    # -- GPS -----------------------------------------------------------------
+    def _build_gps_group(self) -> QGroupBox:
+        group = QGroupBox("GPS / GNSS")
+        outer = QVBoxLayout(group)
+
+        note = QLabel(
+            "USB NMEA receivers can be left on auto-detect. Use a fixed "
+            "/dev/serial/by-id/... path when the unit has more serial devices."
+        )
+        note.setWordWrap(True)
+        outer.addWidget(note)
+
+        form = self._new_form_layout()
+        outer.addLayout(form)
+
+        self.gps_device_edit = QLineEdit()
+        self.gps_device_edit.setPlaceholderText("auto or /dev/serial/by-id/...")
+        form.addRow("GPS device", self.gps_device_edit)
+
+        self.gps_baudrate_combo = QComboBox()
+        for label, value in GPS_BAUDRATES:
+            self.gps_baudrate_combo.addItem(label, value)
+        form.addRow("Baudrate", self.gps_baudrate_combo)
+
+        apply_btn = QPushButton("APPLY GPS")
+        apply_btn.clicked.connect(self._emit_gps_apply)
+        form.addRow(apply_btn)
+
+        return group
+
+    def set_gps_values(self, device: str | None, baudrate: int | str | None) -> None:
+        self.gps_device_edit.setText(str(device or "auto"))
+        target = baudrate if baudrate is not None else 9600
+        selected = 0
+        for index in range(self.gps_baudrate_combo.count()):
+            if str(self.gps_baudrate_combo.itemData(index)) == str(target):
+                selected = index
+                break
+        self.gps_baudrate_combo.setCurrentIndex(selected)
+
+    def _emit_gps_apply(self) -> None:
+        device = self.gps_device_edit.text().strip() or "auto"
+        self.gps_apply_requested.emit(device, self.gps_baudrate_combo.currentData())
+
     # -- video source ----------------------------------------------------------
     def _build_video_group(self) -> QGroupBox:
         group = QGroupBox("VIDEO SOURCE")
@@ -330,7 +406,7 @@ class SettingsDialog(QDialog):
         note.setWordWrap(True)
         outer.addWidget(note)
 
-        form = QFormLayout()
+        form = self._new_form_layout()
         outer.addLayout(form)
 
         self.video_device_combo = QComboBox()
@@ -381,7 +457,7 @@ class SettingsDialog(QDialog):
     # -- audio ---------------------------------------------------------------
     def _build_audio_group(self) -> QGroupBox:
         group = QGroupBox("AUDIO")
-        form = QFormLayout(group)
+        form = self._new_form_layout(group)
 
         self.input_device_combo = QComboBox()
         form.addRow("PTT microphone", self.input_device_combo)
@@ -418,7 +494,7 @@ class SettingsDialog(QDialog):
         note.setWordWrap(True)
         outer.addWidget(note)
 
-        form = QFormLayout()
+        form = self._new_form_layout()
         outer.addLayout(form)
 
         self.gimbal_connection_combo = QComboBox()
@@ -459,6 +535,14 @@ class SettingsDialog(QDialog):
         self.ble_rx_char_uuid_edit.setPlaceholderText("Optional notify characteristic UUID")
         form.addRow("BLE notify UUID", self.ble_rx_char_uuid_edit)
 
+        self.ble_velocity_timeout_spin = QDoubleSpinBox()
+        self.ble_velocity_timeout_spin.setRange(0.03, 1.0)
+        self.ble_velocity_timeout_spin.setSingleStep(0.01)
+        self.ble_velocity_timeout_spin.setDecimals(2)
+        self.ble_velocity_timeout_spin.setSuffix(" s")
+        self.ble_velocity_timeout_spin.setValue(0.15)
+        form.addRow("BLE joystick timeout", self.ble_velocity_timeout_spin)
+
         self.can_channel_edit = QLineEdit()
         self.can_channel_edit.setPlaceholderText("can0")
         form.addRow("CAN channel", self.can_channel_edit)
@@ -492,6 +576,7 @@ class SettingsDialog(QDialog):
         self.ble_service_uuid_edit.setText(str(cfg.get("ble_service_uuid", "") or ""))
         self.ble_tx_char_uuid_edit.setText(str(cfg.get("ble_tx_char_uuid", "") or ""))
         self.ble_rx_char_uuid_edit.setText(str(cfg.get("ble_rx_char_uuid", "") or ""))
+        self.ble_velocity_timeout_spin.setValue(float(cfg.get("ble_velocity_timeout_s", 0.15)))
         self.can_channel_edit.setText(str(cfg.get("can_channel", "can0")))
         self.uart_device_edit.setText(str(cfg.get("uart_device", "/dev/ttyAMA0")))
         self.uart_baudrate_spin.setValue(int(cfg.get("uart_baudrate", 115200)))
@@ -506,6 +591,7 @@ class SettingsDialog(QDialog):
                 "ble_service_uuid": self._text_or_none(self.ble_service_uuid_edit),
                 "ble_tx_char_uuid": self._text_or_none(self.ble_tx_char_uuid_edit),
                 "ble_rx_char_uuid": self._text_or_none(self.ble_rx_char_uuid_edit),
+                "ble_velocity_timeout_s": self.ble_velocity_timeout_spin.value(),
                 "can_channel": self.can_channel_edit.text().strip() or "can0",
                 "uart_device": self.uart_device_edit.text().strip() or "/dev/ttyAMA0",
                 "uart_baudrate": self.uart_baudrate_spin.value(),
@@ -585,7 +671,7 @@ class SettingsDialog(QDialog):
         note.setWordWrap(True)
         outer.addWidget(note)
 
-        conn_form = QFormLayout()
+        conn_form = self._new_form_layout()
         outer.addLayout(conn_form)
 
         self.camera_ip_edit = QLineEdit()
@@ -601,7 +687,7 @@ class SettingsDialog(QDialog):
         camera_apply_btn.clicked.connect(self._emit_camera_address_apply)
         conn_form.addRow(camera_apply_btn)
 
-        form = QFormLayout()
+        form = self._new_form_layout()
         outer.addLayout(form)
 
         self.iso_combo = QComboBox()
@@ -661,7 +747,7 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         outer.addWidget(hint)
 
-        form = QFormLayout()
+        form = self._new_form_layout()
         outer.addLayout(form)
 
         self.target_class_combo = QComboBox()
@@ -747,7 +833,7 @@ class SettingsDialog(QDialog):
         hint.setWordWrap(True)
         outer.addWidget(hint)
 
-        form = QFormLayout()
+        form = self._new_form_layout()
         outer.addLayout(form)
 
         self.ride_lock_checkbox = QCheckBox("Lock camera/gimbal settings while riding")

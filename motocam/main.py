@@ -19,14 +19,14 @@ if __package__ in (None, ""):
 
 import qasync
 from PyQt6.QtCore import QRect, Qt, QTimer
-from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt6.QtWidgets import QApplication, QSplashScreen
 
 from motocam.camera.base import CameraController
 from motocam.camera.mock_camera import MockCameraBackend
 from motocam.camera.bmd_rest_camera import BlackmagicRestCameraBackend
 from motocam.core.config import load_config, resolve_config_path
-from motocam.core.logging_setup import install_crash_guard, setup_logging
+from motocam.core.logging_setup import install_control_room_log_forwarder, install_crash_guard, setup_logging
 from motocam.gimbal.base import GimbalController
 from motocam.gimbal.factory import build_gimbal_controller
 from motocam.gps.gps_manager import GpsManager
@@ -39,6 +39,7 @@ from motocam.watchdog.ui_watchdog import UiLatencyWatchdog
 
 
 LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "logo_ccf" / "CSC Logo Horizontal EN RGB.png"
+APP_ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "icons" / "motocam.svg"
 
 
 def build_gimbal(cfg: dict) -> GimbalController:
@@ -157,6 +158,7 @@ def main() -> int:
         logger.info("UI scale factor set to %.2f", ui_scale)
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
     app.setStyleSheet(DARK_STYLESHEET)
     splash = create_splash()
     splash.show()
@@ -176,6 +178,7 @@ def main() -> int:
         url=telemetry_cfg.get("control_room_url", "ws://127.0.0.1:8765"),
         unit_id=cfg.get("unit_id", "moto-1"),
     )
+    install_control_room_log_forwarder(logging.getLogger("motocam"), link)
 
     camera_cfg = cfg.get("camera", {})
     window = MainWindow(

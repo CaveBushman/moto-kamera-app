@@ -22,8 +22,8 @@ class StatusChip(QLabel):
         self.setMinimumWidth(58)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setTextFormat(Qt.TextFormat.RichText)
-        self._state = "idle"
-        self._value = "--"
+        self._state = ""
+        self._value = ""
         self.set_state("idle", "--")
 
         self._blink_timer = QTimer(self)
@@ -40,12 +40,19 @@ class StatusChip(QLabel):
             "bad": "statusBad",
             "idle": "statusIdle",
         }.get(state, "statusIdle")
+        class_name = f"statusChip {css_class}"
+        value = self._value_text(text if text is not None else self._label)
+        if state == self._state and value == self._value and self.property("class") == class_name:
+            return
+        class_changed = self.property("class") != class_name
         self._state = state
-        self._value = self._value_text(text if text is not None else self._label)
-        self.setProperty("class", f"statusChip {css_class}")
+        self._value = value
+        if class_changed:
+            self.setProperty("class", class_name)
         self._render()
-        self.style().unpolish(self)
-        self.style().polish(self)
+        if class_changed:
+            self.style().unpolish(self)
+            self.style().polish(self)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)

@@ -81,6 +81,18 @@ class GimbalController:
         if self.backend.connected:
             self.pan_deg, self.tilt_deg, self.roll_deg = await self.backend.get_orientation()
 
+    async def check_connection(self) -> bool:
+        checker = getattr(self.backend, "check_connection", None)
+        if callable(checker):
+            return bool(await checker())
+        return self.backend.connected
+
+    def velocity_stats(self) -> dict[str, float | int | None]:
+        stats = getattr(self.backend, "velocity_stats", None)
+        if callable(stats):
+            return dict(stats())
+        return {}
+
     async def _send_clamped(self, pan_deg_s: float, tilt_deg_s: float) -> None:
         pan = max(-self.max_pan_speed, min(self.max_pan_speed, pan_deg_s))
         tilt = max(-self.max_tilt_speed, min(self.max_tilt_speed, tilt_deg_s))

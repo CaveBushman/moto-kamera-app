@@ -10,7 +10,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from motocam.ai.ai_engine import AiEngine
@@ -59,6 +59,24 @@ STATE_TO_CHIP = {
     "lost": "bad",
     "idle": "idle",
 }
+
+
+class GpsReconfigureWorker(QThread):
+    completed = pyqtSignal(object)  # GpsManager
+
+    def __init__(self, device: str, baudrate: int | str, parent=None):
+        super().__init__(parent)
+        self.device = device
+        self.baudrate = baudrate
+
+    def run(self) -> None:  # noqa: D401 -- QThread entry point
+        gps = GpsManager(device=self.device, baudrate=self.baudrate)
+        try:
+            gps.open()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("GPS reconfigure failed (%s), falling back to simulated GPS", exc)
+            gps = GpsManager(device=None)
+        self.completed.emit(gps)
 
 
 class MainWindow(QMainWindow):
@@ -129,11 +147,15 @@ class MainWindow(QMainWindow):
         self._gimbal_refresh_task: asyncio.Task | None = None
         self._gimbal_connect_task: asyncio.Task | None = None
         self._gimbal_velocity_task: asyncio.Task | None = None
-        self._pending_gimbal_velocity: tuple[bool, float, float] | None = None
+        self._latest_gimbal_velocity: tuple[bool, float, float] | None = None
+        self._gimbal_velocity_event: asyncio.Event | None = None
         self._manual_pan_v = 0.0
         self._manual_tilt_v = 0.0
         self._zoom_task: asyncio.Task | None = None
         self._pending_zoom_speed: float | None = None
+        self._gps_reconfigure_worker: GpsReconfigureWorker | None = None
+        self._pending_gps_config: tuple[str, int | str] | None = None
+        self._gps_reconfiguring = False
 
         self._build_ui()
         self._wire_signals()
@@ -157,6 +179,11 @@ class MainWindow(QMainWindow):
         root.addWidget(self.stage_banner)
 
         self.preview = PreviewView()
+        display_cfg = self._config.get("display", {})
+        self.preview.set_render_options(
+            max_fps=display_cfg.get("preview_fps", 20.0),
+            smooth_scaling=bool(display_cfg.get("preview_smooth_scaling", False)),
+        )
         root.addWidget(self.preview, stretch=1)
 
         # CAMERA/GIMBAL readouts float on top of the live feed (see
@@ -180,7 +207,7 @@ class MainWindow(QMainWindow):
         # PTT/zoom/joystick default sizes felt small on the real Pi
         # touchscreen -- display.controls_scale enlarges them on top of
         # the global UI scale, tunable without touching code.
-        controls_scale = float(self._config.get("display", {}).get("controls_scale", 1.0))
+        controls_scale = float(display_cfg.get("controls_scale", 1.0))
         if controls_scale != 1.0:
             self.preview.set_controls_scale(controls_scale)
         # SETTINGS mirrors the CAM/GIMBAL toggle on the opposite corner --
@@ -210,6 +237,11 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self) -> None:
         self._settings.set_connection_values(self.link.unit_id, self.link.url)
+        gps_cfg = self._config.get("gps") or {}
+        self._settings.set_gps_values(
+            gps_cfg.get("device", self.gps.device),
+            gps_cfg.get("baudrate", self.gps.baudrate),
+        )
         self._settings.set_video_values(self.video_engine.device)
         self._settings.set_audio_values(self.ptt_engine.input_device, self.talkback_player.output_device)
         self._settings.set_gimbal_values(self._config.get("gimbal", {}))
@@ -275,6 +307,7 @@ class MainWindow(QMainWindow):
 
         self._settings.connection_apply_requested.connect(self._on_connection_apply)
         self._settings.camera_apply_requested.connect(self._on_camera_address_apply)
+        self._settings.gps_apply_requested.connect(self._on_gps_apply)
         self._settings.audio_apply_requested.connect(self._on_audio_apply)
         self._settings.video_device_apply_requested.connect(self._on_video_device_apply)
         self._settings.gimbal_apply_requested.connect(self._on_gimbal_apply)
@@ -313,20 +346,36 @@ class MainWindow(QMainWindow):
             logger.warning("%s failed: %s", label, exc)
 
     def _request_gimbal_velocity(self, manual: bool, pan_deg_s: float, tilt_deg_s: float) -> None:
+        self._latest_gimbal_velocity = (manual, pan_deg_s, tilt_deg_s)
+        if self._gimbal_velocity_event is None:
+            self._gimbal_velocity_event = asyncio.Event()
+        self._gimbal_velocity_event.set()
         task = self._gimbal_velocity_task
         if task is not None and not task.done():
-            self._pending_gimbal_velocity = (manual, pan_deg_s, tilt_deg_s)
             return
-        self._start_gimbal_velocity(manual, pan_deg_s, tilt_deg_s)
+        self._start_gimbal_velocity_worker()
 
-    def _start_gimbal_velocity(self, manual: bool, pan_deg_s: float, tilt_deg_s: float) -> None:
-        async def send_velocity() -> None:
-            if manual:
-                await self.gimbal.manual_move(pan_deg_s, tilt_deg_s)
-            else:
-                await self.gimbal.ai_move(pan_deg_s, tilt_deg_s)
+    def _start_gimbal_velocity_worker(self) -> None:
+        async def send_latest_velocity() -> None:
+            event = self._gimbal_velocity_event
+            if event is None:
+                return
+            while True:
+                await event.wait()
+                event.clear()
+                command = self._latest_gimbal_velocity
+                self._latest_gimbal_velocity = None
+                if command is None:
+                    continue
+                manual, pan_deg_s, tilt_deg_s = command
+                if manual:
+                    await self.gimbal.manual_move(pan_deg_s, tilt_deg_s)
+                else:
+                    await self.gimbal.ai_move(pan_deg_s, tilt_deg_s)
+                if self._latest_gimbal_velocity is None:
+                    return
 
-        task = asyncio.ensure_future(send_velocity())
+        task = asyncio.ensure_future(send_latest_velocity())
         self._gimbal_velocity_task = task
         task.add_done_callback(self._on_gimbal_velocity_done)
 
@@ -334,10 +383,8 @@ class MainWindow(QMainWindow):
         if self._gimbal_velocity_task is task:
             self._gimbal_velocity_task = None
         self._consume_task_result(task, "gimbal velocity")
-        pending = self._pending_gimbal_velocity
-        self._pending_gimbal_velocity = None
-        if pending is not None:
-            self._start_gimbal_velocity(*pending)
+        if self._latest_gimbal_velocity is not None:
+            self._request_gimbal_velocity(*self._latest_gimbal_velocity)
 
     def _request_zoom_speed(self, speed: float) -> None:
         task = self._zoom_task
@@ -372,7 +419,9 @@ class MainWindow(QMainWindow):
             if task is not None and not task.done():
                 task.cancel()
             setattr(self, attr_name, None)
-        self._pending_gimbal_velocity = None
+        self._latest_gimbal_velocity = None
+        if self._gimbal_velocity_event is not None:
+            self._gimbal_velocity_event.clear()
         self._manual_pan_v = 0.0
         self._manual_tilt_v = 0.0
         self._pending_zoom_speed = None
@@ -656,6 +705,9 @@ class MainWindow(QMainWindow):
 
     # -- GPS / telemetry / health --------------------------------------------
     def _gps_tick(self) -> None:
+        if self._gps_reconfiguring:
+            self.top_bar.gps_chip.set_state("warn", "GPS APPLY")
+            return
         fix = self.gps.poll()
         if is_fallback_source(self.gps.source):
             self.top_bar.gps_chip.set_state("warn", f"GPS {source_value_display(self.gps.source)}")
@@ -674,8 +726,8 @@ class MainWindow(QMainWindow):
         if self.gimbal.connected:
             self._schedule_unique_task(
                 "_gimbal_refresh_task",
-                "gimbal orientation refresh",
-                self.gimbal.refresh_orientation,
+                "gimbal watchdog refresh",
+                self._gimbal_watchdog_refresh,
             )
         else:
             self._schedule_unique_task("_gimbal_connect_task", "gimbal connect", self.gimbal.connect)
@@ -705,6 +757,11 @@ class MainWindow(QMainWindow):
             self.top_bar.rec_chip.set_state("idle", "REC")
         self.preview.set_recording(self.camera.state.recording)
 
+    async def _gimbal_watchdog_refresh(self) -> None:
+        if not await self.gimbal.check_connection():
+            return
+        await self.gimbal.refresh_orientation()
+
     def _telemetry_tick(self) -> None:
         sys_stats = self.health.sample()
         # 500ms window -> bytes * 8 bits/byte / 1000 (kb) / 0.5s
@@ -714,6 +771,7 @@ class MainWindow(QMainWindow):
             self._preview_bitrate_kbps = None
         self._preview_bytes_accum = 0
         ai_stats = self.ai_worker.stats()
+        gimbal_stats = self.gimbal.velocity_stats()
         telemetry = Telemetry(
             gps=self.gps.state,
             ai=AiTelemetry(
@@ -728,6 +786,11 @@ class MainWindow(QMainWindow):
             gimbal=GimbalTelemetry(
                 connected=self.gimbal.connected, mode=self.gimbal.mode.value,
                 pan_deg=self.gimbal.pan_deg, tilt_deg=self.gimbal.tilt_deg, roll_deg=self.gimbal.roll_deg,
+                velocity_write_ms_avg=gimbal_stats.get("velocity_write_ms_avg"),
+                velocity_write_ms_max=gimbal_stats.get("velocity_write_ms_max"),
+                velocity_call_gap_ms_avg=gimbal_stats.get("velocity_call_gap_ms_avg"),
+                velocity_call_gap_ms_max=gimbal_stats.get("velocity_call_gap_ms_max"),
+                velocity_timeouts=int(gimbal_stats.get("velocity_timeouts") or 0),
             ),
             camera=CameraTelemetry(
                 connected=self.camera.connected, recording=self.camera.state.recording,
@@ -853,6 +916,46 @@ class MainWindow(QMainWindow):
         camera_cfg["rest_port"] = port  # this field IS the REST port now
         self._save_config()
 
+    def _on_gps_apply(self, device: str, baudrate: int | str) -> None:
+        worker = self._gps_reconfigure_worker
+        if worker is not None and worker.isRunning():
+            logger.info("GPS reconfigure already running; ignoring duplicate apply")
+            return
+
+        self._gps_reconfiguring = True
+        self._pending_gps_config = (device, baudrate)
+        self.top_bar.gps_chip.set_state("warn", "GPS APPLY")
+        try:
+            self.gps.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("old GPS close failed before reconfigure: %s", exc)
+
+        worker = GpsReconfigureWorker(device=device, baudrate=baudrate, parent=self)
+        worker.completed.connect(self._on_gps_reconfigured)
+        worker.finished.connect(self._on_gps_reconfigure_finished)
+        self._gps_reconfigure_worker = worker
+        worker.start()
+        logger.info("GPS reconfigure requested: device=%s baudrate=%s", device, baudrate)
+
+    def _on_gps_reconfigured(self, gps: GpsManager) -> None:
+        self.gps = gps
+        requested = self._pending_gps_config
+        if requested is not None:
+            device, baudrate = requested
+            gps_cfg = self._config.setdefault("gps", {})
+            gps_cfg["device"] = device
+            gps_cfg["baudrate"] = baudrate
+            self._save_config()
+        self._gps_reconfiguring = False
+        self._pending_gps_config = None
+        logger.info("GPS reconfigured: source=%s device=%s baudrate=%s", gps.source, gps.device, gps.baudrate)
+
+    def _on_gps_reconfigure_finished(self) -> None:
+        worker = self._gps_reconfigure_worker
+        self._gps_reconfigure_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
     def _on_audio_apply(self, input_device, output_device) -> None:
         self.ptt_engine.set_input_device(input_device)
         self.talkback_player.set_output_device(output_device)
@@ -900,7 +1003,9 @@ class MainWindow(QMainWindow):
             if task is not None and not task.done():
                 task.cancel()
             setattr(self, attr_name, None)
-        self._pending_gimbal_velocity = None
+        self._latest_gimbal_velocity = None
+        if self._gimbal_velocity_event is not None:
+            self._gimbal_velocity_event.clear()
         try:
             await self.gimbal.disconnect()
         except Exception as exc:  # noqa: BLE001
@@ -949,6 +1054,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         self._cancel_background_tasks()
         self._settings.stop_background_work()
+        worker = self._gps_reconfigure_worker
+        if worker is not None and worker.isRunning() and not worker.wait(1000):
+            logger.warning("GPS reconfigure worker still running during shutdown")
         self.ptt_engine.stop()
         self.talkback_player.stop()
         # Stop hardware/timers so nothing keeps the event loop alive after

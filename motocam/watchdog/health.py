@@ -8,11 +8,13 @@ to None fields on platforms where the sysfs thermal path doesn't exist
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 from motocam.core.protocol import SystemTelemetry
 
 logger = logging.getLogger("motocam.watchdog")
+DEFAULT_SAMPLE_INTERVAL_S = 1.5
 
 try:
     import psutil
@@ -24,19 +26,29 @@ RPI_THERMAL_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
 
 
 class HealthMonitor:
-    def __init__(self):
+    def __init__(self, sample_interval_s: float = DEFAULT_SAMPLE_INTERVAL_S):
         self._video_fps = 0.0
+        self._sample_interval_s = max(0.0, float(sample_interval_s))
+        self._last_sample_at = 0.0
+        self._last_sample: SystemTelemetry | None = None
 
     def set_video_fps(self, fps: float) -> None:
         self._video_fps = fps
+        if self._last_sample is not None:
+            self._last_sample.video_fps = fps
 
     def sample(self) -> SystemTelemetry:
-        return SystemTelemetry(
+        now = time.monotonic()
+        if self._last_sample is not None and now - self._last_sample_at < self._sample_interval_s:
+            return self._last_sample
+        self._last_sample = SystemTelemetry(
             cpu_temp_c=self._read_cpu_temp(),
             cpu_load_pct=self._safe_psutil(lambda: psutil.cpu_percent(interval=None)),
             ram_used_pct=self._safe_psutil(lambda: psutil.virtual_memory().percent),
             video_fps=self._video_fps,
         )
+        self._last_sample_at = now
+        return self._last_sample
 
     @staticmethod
     def _safe_psutil(fn) -> float | None:

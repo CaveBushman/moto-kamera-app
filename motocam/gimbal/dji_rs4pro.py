@@ -58,20 +58,14 @@ CAN_RECV_ID = 0x222  # verified against the reference implementation
 CAN_BITRATE = 1_000_000
 RECONNECT_MIN_INTERVAL_S = 5.0
 REPLY_TIMEOUT_S = 0.8
-# Bounds a single joystick write's wait. Comfortably above every write_ms
-# we've measured on the Pi so far (worst logged max: 1122ms) so it never
-# fires on ordinary slow-BLE-write conditions, but well under the ~3s
-# freeze reported live: without this, set_velocity() awaits
-# write_gatt_char() with no deadline, so one stalled GATT write blocks
-# the *entire* joystick pipeline (nothing else is sent, and the
-# coalescing in main_window.py discards -- doesn't queue -- whatever the
-# operator did meanwhile) until that single write finally returns.
-# Timing out cancels the awaited coroutine, which should abort the
-# underlying D-Bus call rather than leaving it to complete in the
-# background, so the very next tick's coalesced (freshest) command can
-# go out immediately instead of waiting behind a stuck one.
-VELOCITY_SEND_TIMEOUT_S = 1.5
+# Bounds a single joystick write's wait. A command older than a few hundred
+# milliseconds is already harmful for hand control: waiting behind it is the
+# "rubber band" lag the rider feels. Timeout drops the stale write so the
+# next control tick can send the freshest joystick state instead.
+VELOCITY_SEND_TIMEOUT_S = 0.15
 BLE_NOTIFY_QUEUE_MAX = 256
+SERVICE_DISCOVERY_RETRY_S = 0.05
+SERVICE_DISCOVERY_TIMEOUT_S = 1.5
 
 try:
     import can  # python-can, optional: only needed on the Pi with a CAN adapter
@@ -307,6 +301,9 @@ class BleTransport:
     def label(self) -> str:
         return "BLE"
 
+    def is_connected(self) -> bool:
+        return bool(self._client is not None and getattr(self._client, "is_connected", False))
+
     async def open(self) -> None:
         if not BLE_AVAILABLE:
             raise RuntimeError("bleak is not installed -- pip3 install bleak")
@@ -402,9 +399,25 @@ class BleTransport:
         if self._client is None or self._endpoint is None:
             raise RuntimeError("BLE transport is not open")
         for offset in range(0, len(frame), self.mtu_payload_bytes):
+            chunk = frame[offset : offset + self.mtu_payload_bytes]
+            await self._write_chunk(chunk)
+
+    async def _write_chunk(self, chunk: bytes) -> None:
+        assert self._client is not None and self._endpoint is not None
+        try:
             await self._client.write_gatt_char(
                 self._endpoint.tx_uuid,
-                frame[offset : offset + self.mtu_payload_bytes],
+                chunk,
+                response=self._endpoint.write_with_response,
+            )
+        except Exception as exc:  # noqa: BLE001 -- bleak raises backend-specific errors here
+            if "Service Discovery has not been performed yet" not in str(exc):
+                raise
+            logger.debug("BLE write hit service-discovery race; waiting and retrying once")
+            await self._get_services()
+            await self._client.write_gatt_char(
+                self._endpoint.tx_uuid,
+                chunk,
                 response=self._endpoint.write_with_response,
             )
 
@@ -448,19 +461,28 @@ class BleTransport:
 
     async def _get_services(self):
         assert self._client is not None
-        try:
-            services = getattr(self._client, "services", None)
-        except Exception:
-            services = None
-        if services is not None:
-            return services
-        getter = getattr(self._client, "get_services", None)
-        if getter is None:
-            raise RuntimeError("BLE client did not expose GATT services")
-        result = getter()
-        if inspect.isawaitable(result):
-            return await result
-        return result
+        deadline = time.monotonic() + SERVICE_DISCOVERY_TIMEOUT_S
+        last_exc: Exception | None = None
+        while True:
+            try:
+                services = getattr(self._client, "services", None)
+            except Exception as exc:  # noqa: BLE001 -- BleakError on discovery not ready
+                services = None
+                last_exc = exc
+            if services is not None:
+                return services
+            getter = getattr(self._client, "get_services", None)
+            if getter is not None:
+                result = getter()
+                if inspect.isawaitable(result):
+                    result = await result
+                if result is not None:
+                    return result
+            if time.monotonic() >= deadline:
+                if last_exc is not None:
+                    raise RuntimeError(f"BLE service discovery did not complete: {last_exc}") from last_exc
+                raise RuntimeError("BLE client did not expose GATT services")
+            await asyncio.sleep(SERVICE_DISCOVERY_RETRY_S)
 
     def _on_notify(self, _sender, data: bytearray | bytes) -> None:
         if self._queue is not None:
@@ -577,7 +599,13 @@ class BleTransport:
 
 
 class DjiRs4ProBackend(GimbalBackend):
-    def __init__(self, transport, max_pan_speed: float = 20.0, max_tilt_speed: float = 12.0) -> None:
+    def __init__(
+        self,
+        transport,
+        max_pan_speed: float = 20.0,
+        max_tilt_speed: float = 12.0,
+        velocity_send_timeout_s: float = VELOCITY_SEND_TIMEOUT_S,
+    ) -> None:
         self.transport = transport
         # Needed to normalize deg/s into the DUML joystick's [-1, 1] ratio
         # (see build_joystick_frame) -- GimbalController clamps to these same
@@ -585,6 +613,7 @@ class DjiRs4ProBackend(GimbalBackend):
         # request maps to a full-deflection joystick channel value.
         self.max_pan_speed = max(1e-6, max_pan_speed)
         self.max_tilt_speed = max(1e-6, max_tilt_speed)
+        self.velocity_send_timeout_s = max(0.03, float(velocity_send_timeout_s))
         self._connected = False
         self._sequence = 0
         self._assembler = FrameAssembler()
@@ -616,6 +645,8 @@ class DjiRs4ProBackend(GimbalBackend):
         # CPU) -- those point at very different fixes.
         self._velocity_send_durations_ms: list[float] = []
         self._velocity_call_gaps_ms: list[float] = []
+        self._velocity_timeout_count = 0
+        self._last_velocity_stats: dict[str, float | int | None] = {}
         self._last_velocity_call_at: float | None = None
         self._velocity_stats_logged_at = 0.0
 
@@ -733,13 +764,14 @@ class DjiRs4ProBackend(GimbalBackend):
             send_start = now
             try:
                 await asyncio.wait_for(
-                    self._call_transport("send", frame), timeout=VELOCITY_SEND_TIMEOUT_S
+                    self._call_transport("send", frame), timeout=self.velocity_send_timeout_s
                 )
             except asyncio.TimeoutError:
+                self._velocity_timeout_count += 1
                 logger.warning(
-                    "BLE joystick write stalled past %.1fs, abandoning -- next tick's "
+                    "BLE joystick write stalled past %.2fs, abandoning -- next tick's "
                     "freshest command will be sent instead of waiting behind it",
-                    VELOCITY_SEND_TIMEOUT_S,
+                    self.velocity_send_timeout_s,
                 )
                 self._velocity_send_durations_ms.append((time.monotonic() - send_start) * 1000.0)
                 self._log_velocity_timing_stats(now)
@@ -767,16 +799,43 @@ class DjiRs4ProBackend(GimbalBackend):
             return
         durations = self._velocity_send_durations_ms
         gaps = self._velocity_call_gaps_ms
+        stats = self._build_velocity_stats(durations, gaps, self._velocity_timeout_count)
+        self._last_velocity_stats = stats
         logger.info(
             "BLE joystick timing (n=%d): write_ms min/avg/max=%.1f/%.1f/%.1f  "
-            "call_gap_ms min/avg/max=%s",
+            "call_gap_ms min/avg/max=%s  timeouts=%d",
             len(durations),
             min(durations), sum(durations) / len(durations), max(durations),
             f"{min(gaps):.1f}/{sum(gaps) / len(gaps):.1f}/{max(gaps):.1f}" if gaps else "n/a",
+            self._velocity_timeout_count,
         )
         self._velocity_send_durations_ms.clear()
         self._velocity_call_gaps_ms.clear()
+        self._velocity_timeout_count = 0
         self._velocity_stats_logged_at = now
+
+    def velocity_stats(self) -> dict[str, float | int | None]:
+        if self._velocity_send_durations_ms:
+            return self._build_velocity_stats(
+                self._velocity_send_durations_ms,
+                self._velocity_call_gaps_ms,
+                self._velocity_timeout_count,
+            )
+        return dict(self._last_velocity_stats)
+
+    @staticmethod
+    def _build_velocity_stats(
+        durations: list[float],
+        gaps: list[float],
+        timeouts: int,
+    ) -> dict[str, float | int | None]:
+        return {
+            "velocity_write_ms_avg": sum(durations) / len(durations) if durations else None,
+            "velocity_write_ms_max": max(durations) if durations else None,
+            "velocity_call_gap_ms_avg": sum(gaps) / len(gaps) if gaps else None,
+            "velocity_call_gap_ms_max": max(gaps) if gaps else None,
+            "velocity_timeouts": timeouts,
+        }
 
     async def go_home(self) -> None:
         if not self._connected:
@@ -810,6 +869,24 @@ class DjiRs4ProBackend(GimbalBackend):
         if orientation is not None:
             self._last_orientation = orientation
         return self._last_orientation
+
+    async def check_connection(self) -> bool:
+        if not self._connected:
+            return False
+        checker = getattr(self.transport, "is_connected", None)
+        if not callable(checker):
+            return True
+        try:
+            alive = bool(await self._call_transport("is_connected"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Gimbal transport health check failed (%s), marking disconnected", exc)
+            self._connected = False
+            return False
+        if not alive:
+            label = getattr(self.transport, "label", self.transport.__class__.__name__)
+            logger.warning("Gimbal %s transport disconnected, reconnect will be attempted", label)
+            self._connected = False
+        return alive
 
     async def _drain_duml_telemetry(self) -> None:
         chunk = await self._call_transport("drain")

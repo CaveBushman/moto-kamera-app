@@ -171,6 +171,8 @@ class MainWindow(QMainWindow):
         self._gps_reconfigure_worker: GpsReconfigureWorker | None = None
         self._pending_gps_config: tuple[str, int | str] | None = None
         self._gps_reconfiguring = False
+        self._last_pipeline_log_at = 0.0
+        self._last_slow_frame_log_at = 0.0
 
         self._build_ui()
         self._wire_signals()
@@ -491,12 +493,16 @@ class MainWindow(QMainWindow):
             logger.warning("frame processing error (skipped): %s", exc)
 
     def _process_frame(self, frame: np.ndarray) -> None:
+        frame_started = time.monotonic()
+        checkpoint = frame_started
         self._last_frame = frame
         # CSRT update() is heavy; run it on the tracker's worker thread
         # (submit drops stale frames) instead of blocking the UI here. The
         # bbox/state read below reflect the last completed update -- <1 frame
         # of lag on the overlay, which is imperceptible.
         self.tracker.submit(frame)
+        tracker_submit_ms = (time.monotonic() - checkpoint) * 1000.0
+        checkpoint = time.monotonic()
 
         # Inference is done off the UI thread; hand off the newest frame and
         # act on the most recent detections the worker has produced. Seeding
@@ -506,6 +512,8 @@ class MainWindow(QMainWindow):
             self.ai_worker.submit(frame)
         else:
             self._latest_detections = []
+        ai_submit_ms = (time.monotonic() - checkpoint) * 1000.0
+        checkpoint = time.monotonic()
         detections = self._latest_detections
         # FULL AI auto-acquire (design doc 8.2/8.3): with no active target,
         # lock onto the highest-confidence detection of the configured
@@ -523,6 +531,8 @@ class MainWindow(QMainWindow):
                 self.pid.reset()
         self.preview.set_bbox(self.tracker.bbox, self.tracker.state.value)
         self.preview.update_frame(frame)
+        preview_submit_ms = (time.monotonic() - checkpoint) * 1000.0
+        checkpoint = time.monotonic()
 
         if self._ai_guard_paused():
             self.top_bar.ai_chip.set_state("warn", "AI PAUSED")
@@ -532,13 +542,60 @@ class MainWindow(QMainWindow):
             chip_state = STATE_TO_CHIP.get(self.tracker.state.value, "idle")
             self.top_bar.ai_chip.set_state(chip_state, f"AI {self.tracker.state.value.upper()}")
         self.preview.set_tracking_active(self.tracker.state != TargetState.IDLE)
+        ui_chips_ms = (time.monotonic() - checkpoint) * 1000.0
+        checkpoint = time.monotonic()
 
         if self._preview_streaming:
             now = time.monotonic()
             if now - self._last_preview_sent_at < self._preview_interval_s:
+                self._log_frame_path_if_slow(
+                    frame_started,
+                    tracker_submit_ms,
+                    ai_submit_ms,
+                    preview_submit_ms,
+                    ui_chips_ms,
+                    0.0,
+                )
                 return
             self._last_preview_sent_at = now
             self._preview_encoder.submit(frame)
+        preview_relay_ms = (time.monotonic() - checkpoint) * 1000.0
+        self._log_frame_path_if_slow(
+            frame_started,
+            tracker_submit_ms,
+            ai_submit_ms,
+            preview_submit_ms,
+            ui_chips_ms,
+            preview_relay_ms,
+        )
+
+    def _log_frame_path_if_slow(
+        self,
+        started: float,
+        tracker_submit_ms: float,
+        ai_submit_ms: float,
+        preview_submit_ms: float,
+        ui_chips_ms: float,
+        preview_relay_ms: float,
+    ) -> None:
+        total_ms = (time.monotonic() - started) * 1000.0
+        if total_ms < 25.0:
+            return
+        now = time.monotonic()
+        if now - self._last_slow_frame_log_at < 2.0:
+            return
+        self._last_slow_frame_log_at = now
+        logger.warning(
+            "frame UI path slow: total=%.1f ms tracker_submit=%.1f ai_submit=%.1f "
+            "preview_submit=%.1f chips=%.1f preview_relay=%.1f %s",
+            total_ms,
+            tracker_submit_ms,
+            ai_submit_ms,
+            preview_submit_ms,
+            ui_chips_ms,
+            preview_relay_ms,
+            self.pipeline_diagnostics_summary(),
+        )
 
     def _on_detections(self, detections: list) -> None:
         """Latest detections from the off-thread AI worker (queued signal)."""
@@ -874,6 +931,74 @@ class MainWindow(QMainWindow):
             ),
         )
         self.link.send_telemetry(telemetry)
+        self._log_pipeline_stats(ai_stats, gimbal_stats, sys_stats)
+
+    def pipeline_diagnostics_summary(
+        self,
+        ai_stats: dict | None = None,
+        gimbal_stats: dict | None = None,
+        sys_stats=None,
+    ) -> str:
+        ai_stats = ai_stats or self.ai_worker.stats()
+        gimbal_stats = gimbal_stats or self.gimbal.velocity_stats()
+        tracker_stats = self.tracker.stats()
+        preview_stats = self.preview.render_stats()
+        sys_stats = sys_stats or self.health.latest()
+        ai_busy = ai_stats.get("current_busy_ms")
+        tr_busy = tracker_stats.get("current_busy_ms")
+        pv_busy = preview_stats.get("current_busy_ms")
+        return (
+            f"ai={source_value_display(self.ai_engine.source)} enabled={int(self.ai_engine.enabled)} "
+            f"ai_last={self._fmt_ms(ai_stats.get('last_inference_ms'))} "
+            f"ai_busy={self._fmt_ms(ai_busy)} ai_util={self._fmt_pct(ai_stats.get('worker_util_pct'))} "
+            f"ai_drop={ai_stats.get('dropped_frames_total', ai_stats.get('dropped_frames', 0))} "
+            f"tracker={tracker_stats.get('mode')} tr_last={self._fmt_ms(tracker_stats.get('last_update_ms'))} "
+            f"tr_busy={self._fmt_ms(tr_busy)} tr_drop={tracker_stats.get('dropped_frames', 0)} "
+            f"preview_last={self._fmt_ms(preview_stats.get('last_render_ms'))} "
+            f"preview_busy={self._fmt_ms(pv_busy)} preview_drop={preview_stats.get('dropped_frames', 0)} "
+            f"ble_avg={self._fmt_ms(gimbal_stats.get('velocity_write_ms_avg'))} "
+            f"ble_max={self._fmt_ms(gimbal_stats.get('velocity_write_ms_max'))} "
+            f"ble_timeouts={int(gimbal_stats.get('velocity_timeouts') or 0)} "
+            f"cpu={self._fmt_pct(getattr(sys_stats, 'cpu_pct', None))} "
+            f"temp={self._fmt_c(getattr(sys_stats, 'temperature_c', None))} "
+            f"video_fps={getattr(sys_stats, 'video_fps', None) or 0:.0f} "
+            f"sources=vid:{source_value_display(self.video_engine.source)} "
+            f"gmb:{source_value_display(self.gimbal.source)}"
+        )
+
+    def _log_pipeline_stats(self, ai_stats: dict, gimbal_stats: dict, sys_stats) -> None:
+        now = time.monotonic()
+        if now - self._last_pipeline_log_at < 5.0:
+            return
+        self._last_pipeline_log_at = now
+        logger.info("Pipeline stats: %s", self.pipeline_diagnostics_summary(ai_stats, gimbal_stats, sys_stats))
+
+    @staticmethod
+    def _fmt_ms(value) -> str:
+        if value is None:
+            return "--"
+        try:
+            return f"{float(value):.0f}ms"
+        except (TypeError, ValueError):
+            return "--"
+
+    @staticmethod
+    def _fmt_pct(value) -> str:
+        if value is None:
+            return "--"
+        try:
+            return f"{float(value):.0f}%"
+        except (TypeError, ValueError):
+            return "--"
+
+    @staticmethod
+    def _fmt_c(value) -> str:
+        if value is None:
+            return "--"
+        try:
+            return f"{float(value):.0f}C"
+        except (TypeError, ValueError):
+            return "--"
 
     # -- Link (control room) -------------------------------------------------
     def _on_link_connected(self, connected: bool) -> None:

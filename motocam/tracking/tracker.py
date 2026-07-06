@@ -68,6 +68,14 @@ class TrackingEngine:
         self._wake = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self._running = False
+        self._stats_lock = threading.Lock()
+        self._submitted_frames = 0
+        self._dropped_frames = 0
+        self._completed_updates = 0
+        self._failed_updates = 0
+        self._last_update_ms: float | None = None
+        self._busy_started_at: float | None = None
+        self._last_slow_log_at = 0.0
         # detection-driven peloton tracking (UI-thread only, no lock)
         self._byte = ByteTracker()
         self._locked_id: int | None = None
@@ -207,7 +215,12 @@ class TrackingEngine:
         if not self.needs_frame_updates:
             return
         with self._frame_lock:
+            had_pending = self._frame_latest is not None
             self._frame_latest = frame
+        with self._stats_lock:
+            self._submitted_frames += 1
+            if had_pending:
+                self._dropped_frames += 1
         self._wake.set()
 
     @property
@@ -240,8 +253,20 @@ class TrackingEngine:
             if frame is None:
                 continue
             try:
+                started = time.monotonic()
+                with self._stats_lock:
+                    self._busy_started_at = started
                 self.update(frame)
+                elapsed_ms = (time.monotonic() - started) * 1000.0
+                with self._stats_lock:
+                    self._busy_started_at = None
+                    self._last_update_ms = elapsed_ms
+                    self._completed_updates += 1
+                self._log_slow_update(elapsed_ms)
             except Exception as exc:  # noqa: BLE001 -- a bad frame must not kill tracking
+                with self._stats_lock:
+                    self._busy_started_at = None
+                    self._failed_updates += 1
                 logger.warning("tracker update failed: %s", exc)
 
     def stop(self) -> None:
@@ -251,6 +276,35 @@ class TrackingEngine:
         self._worker_thread = None
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+
+    def stats(self) -> dict[str, float | int | str | None]:
+        now = time.monotonic()
+        with self._stats_lock:
+            busy_ms = ((now - self._busy_started_at) * 1000.0) if self._busy_started_at is not None else None
+            mode = "byte" if self._locked_id is not None else ("csrt" if self._tracker is not None else "idle")
+            return {
+                "mode": mode,
+                "submitted_frames": self._submitted_frames,
+                "dropped_frames": self._dropped_frames,
+                "completed_updates": self._completed_updates,
+                "failed_updates": self._failed_updates,
+                "last_update_ms": self._last_update_ms,
+                "current_busy_ms": busy_ms,
+            }
+
+    def _log_slow_update(self, elapsed_ms: float) -> None:
+        if elapsed_ms < 80.0:
+            return
+        now = time.monotonic()
+        if now - self._last_slow_log_at < 2.0:
+            return
+        self._last_slow_log_at = now
+        logger.warning(
+            "CSRT tracker update slow: %.0f ms state=%s bbox=%s",
+            elapsed_ms,
+            self._state.value,
+            self._bbox,
+        )
 
     def error_from_center(self, frame_shape: tuple[int, int]) -> tuple[float, float] | None:
         """Pixel error of target center vs. frame center (desired composition point)."""

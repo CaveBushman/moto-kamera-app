@@ -205,7 +205,7 @@ def main() -> int:
 
     # Field canary: warns to the log if anything ever blocks the UI thread
     # again (all the heavy work is now off it). Silent on a healthy unit.
-    ui_watchdog = UiLatencyWatchdog(parent=window)
+    ui_watchdog = UiLatencyWatchdog(parent=window, context_provider=window.pipeline_diagnostics_summary)
     ui_watchdog.start()
 
     with loop:

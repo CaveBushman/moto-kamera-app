@@ -5,6 +5,7 @@ on the video itself -- that way the operator always knows where the
 control lives without hunting for it."""
 from __future__ import annotations
 
+import logging
 import time
 import threading
 
@@ -30,6 +31,8 @@ CONTROL_HUD_GAP = 16
 MIN_CONTROL_ZONE = 200
 DEFAULT_MAX_RENDER_FPS = 20.0
 
+logger = logging.getLogger("motocam.ui.preview")
+
 
 class PreviewRenderWorker(QThread):
     """Scale preview frames and draw bbox overlays off the Qt UI thread.
@@ -47,6 +50,14 @@ class PreviewRenderWorker(QThread):
         self._wake = threading.Event()
         self._running = True
         self._latest: tuple[np.ndarray, QSize, tuple[int, int, int, int] | None, str, bool] | None = None
+        self._stats_lock = threading.Lock()
+        self._submitted_frames = 0
+        self._dropped_frames = 0
+        self._completed_frames = 0
+        self._failed_frames = 0
+        self._last_render_ms: float | None = None
+        self._busy_started_at: float | None = None
+        self._last_slow_log_at = 0.0
 
     def submit(
         self,
@@ -59,7 +70,12 @@ class PreviewRenderWorker(QThread):
         if label_size.width() <= 0 or label_size.height() <= 0:
             return
         with self._lock:
+            had_pending = self._latest is not None
             self._latest = (frame, QSize(label_size), bbox, target_state, smooth_scaling)
+        with self._stats_lock:
+            self._submitted_frames += 1
+            if had_pending:
+                self._dropped_frames += 1
         self._wake.set()
 
     def run(self) -> None:  # noqa: D401 -- QThread entry point
@@ -73,9 +89,21 @@ class PreviewRenderWorker(QThread):
                 continue
             frame, label_size, bbox, target_state, smooth_scaling = item
             try:
+                started = time.monotonic()
+                with self._stats_lock:
+                    self._busy_started_at = started
                 image = self._render_image(frame, label_size, bbox, target_state, smooth_scaling)
             except Exception:
+                with self._stats_lock:
+                    self._busy_started_at = None
+                    self._failed_frames += 1
                 continue
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            with self._stats_lock:
+                self._busy_started_at = None
+                self._last_render_ms = elapsed_ms
+                self._completed_frames += 1
+            self._log_slow_render(elapsed_ms)
             h, w = frame.shape[:2]
             self.image_ready.emit(image, w, h)
 
@@ -129,6 +157,28 @@ class PreviewRenderWorker(QThread):
         if not self.wait(2000):
             self.terminate()
             self.wait(500)
+
+    def stats(self) -> dict[str, float | int | None]:
+        now = time.monotonic()
+        with self._stats_lock:
+            busy_ms = ((now - self._busy_started_at) * 1000.0) if self._busy_started_at is not None else None
+            return {
+                "submitted_frames": self._submitted_frames,
+                "dropped_frames": self._dropped_frames,
+                "completed_frames": self._completed_frames,
+                "failed_frames": self._failed_frames,
+                "last_render_ms": self._last_render_ms,
+                "current_busy_ms": busy_ms,
+            }
+
+    def _log_slow_render(self, elapsed_ms: float) -> None:
+        if elapsed_ms < 50.0:
+            return
+        now = time.monotonic()
+        if now - self._last_slow_log_at < 2.0:
+            return
+        self._last_slow_log_at = now
+        logger.warning("preview render slow: %.0f ms", elapsed_ms)
 
 
 def _fit_size(frame_w: int, frame_h: int, box_w: int, box_h: int) -> tuple[int, int]:
@@ -455,6 +505,9 @@ class PreviewView(QFrame):
 
     def stop_renderer(self) -> None:
         self._render_worker.stop()
+
+    def render_stats(self) -> dict[str, float | int | None]:
+        return self._render_worker.stats()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)

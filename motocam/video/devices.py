@@ -9,7 +9,9 @@ per node (and can block outright on the /dev/videoN the running capture
 already holds). That blocking probe used to freeze the whole UI every
 time Settings was opened on the Pi. On other platforms (dev laptops
 without a Magewell grabber) we probe a handful of numeric indices, since
-that's all cv2.VideoCapture(int) gives us to work with.
+that's all cv2.VideoCapture(int) gives us to work with -- bounded by a
+wall-clock deadline (PROBE_TIMEOUT_S) since the same class of freeze
+turned out to hit macOS too (see PROBE_TIMEOUT_S's comment).
 """
 from __future__ import annotations
 
@@ -18,6 +20,8 @@ import glob
 import logging
 import os
 import platform
+import threading
+import time
 from dataclasses import dataclass
 
 import cv2
@@ -25,6 +29,22 @@ import cv2
 logger = logging.getLogger("motocam.video")
 
 PROBE_INDEX_COUNT = 6
+# cv2.VideoCapture(index)'s constructor can block for a long time -- or,
+# per a live macOS crash report, indefinitely inside AVFoundation's
+# grabImageUntilDate while validating an index that's out of range or
+# permission-gated. That single blocking probe froze the whole app (not
+# just Settings) and, worse, left the DeviceScanWorker QThread still
+# running when the app tried to exit -- Qt's QThread destructor calls
+# qFatal() (a hard abort()) if it's destroyed while still alive, which is
+# exactly the SIGABRT the crash report showed. Each probe now gets a
+# bounded wall-clock budget via a daemon thread (never a
+# ThreadPoolExecutor -- those aren't daemonic and Python's atexit
+# machinery would block process exit waiting for an abandoned probe to
+# finish, reintroducing the same hang at shutdown instead of at scan
+# time); a timed-out probe is simply abandoned (leaked, not killed --
+# there's no API to cancel an in-flight VideoCapture open) and treated
+# as "no camera there".
+PROBE_TIMEOUT_S = 0.6
 
 # V4L2 QUERYCAP ioctl (linux/videodev2.h). VIDIOC_QUERYCAP = _IOR('V', 0,
 # struct v4l2_capability) where the struct is 104 bytes. We only read the
@@ -97,13 +117,38 @@ def _capture_capable(capabilities: int, device_caps: int) -> bool:
     return bool(effective & _V4L2_CAP_VIDEO_CAPTURE)
 
 
-def _probe_indices() -> list[VideoDevice]:
-    result: list[VideoDevice] = []
-    for index in range(PROBE_INDEX_COUNT):
+def _probe_index(index: int, results: dict[int, VideoDevice], lock: threading.Lock) -> None:
+    try:
         cap = cv2.VideoCapture(index)
         try:
             if cap.isOpened():
-                result.append(VideoDevice(device=index, name=f"Camera {index}"))
+                with lock:
+                    results[index] = VideoDevice(device=index, name=f"Camera {index}")
         finally:
             cap.release()
-    return result
+    except Exception as exc:  # noqa: BLE001 -- one bad index must not break the scan
+        logger.debug("Camera index %d probe failed: %s", index, exc)
+
+
+def _probe_indices() -> list[VideoDevice]:
+    """Probe indices 0..PROBE_INDEX_COUNT-1 in parallel, each on its own
+    daemon thread, against a single shared PROBE_TIMEOUT_S deadline (see
+    module-level comment) -- joining against a per-thread timeout instead
+    would let N hung indices add up to N*PROBE_TIMEOUT_S, defeating the
+    whole point of bounding this scan. Total wall-clock time here is
+    bounded by PROBE_TIMEOUT_S regardless of how many indices hang."""
+    results: dict[int, VideoDevice] = {}
+    lock = threading.Lock()
+    threads = [
+        threading.Thread(target=_probe_index, args=(index, results, lock), daemon=True)
+        for index in range(PROBE_INDEX_COUNT)
+    ]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + PROBE_TIMEOUT_S
+    for index, thread in enumerate(threads):
+        remaining = max(0.0, deadline - time.monotonic())
+        thread.join(timeout=remaining)
+        if thread.is_alive():
+            logger.warning("Camera index %d probe exceeded %.1fs, skipping it", index, PROBE_TIMEOUT_S)
+    return [results[index] for index in sorted(results)]

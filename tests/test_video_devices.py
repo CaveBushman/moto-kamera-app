@@ -4,6 +4,9 @@ number are pure and are exactly what determines whether Settings freezes
 (we must never fall back to opening every /dev/videoN through cv2)."""
 from __future__ import annotations
 
+import time
+
+from motocam.video import devices as devices_module
 from motocam.video.devices import (
     _V4L2_CAP_DEVICE_CAPS,
     _V4L2_CAP_VIDEO_CAPTURE,
@@ -39,3 +42,65 @@ def test_device_caps_capture_accepted_when_flag_set():
     capabilities = _V4L2_CAP_VIDEO_CAPTURE | _V4L2_CAP_DEVICE_CAPS
     device_caps = _V4L2_CAP_VIDEO_CAPTURE
     assert _capture_capable(capabilities, device_caps) is True
+
+
+# -- macOS fallback probe: bounded wall-clock time -------------------------
+class _HangingVideoCapture:
+    """Stands in for cv2.VideoCapture: index 0 "hangs" (simulates the live
+    macOS crash report -- AVFoundation blocked inside grabImageUntilDate),
+    every other index opens instantly."""
+
+    def __init__(self, index: int):
+        self.index = index
+        if index == 0:
+            time.sleep(5.0)
+
+    def isOpened(self) -> bool:
+        return True
+
+    def release(self) -> None:
+        pass
+
+
+def test_probe_indices_bounded_time_when_a_camera_hangs(monkeypatch):
+    """A hung cv2.VideoCapture() must not block the whole scan -- this is
+    the exact freeze from the live macOS crash report: DeviceScanWorker
+    stuck inside a single index's open, and because that QThread never
+    finished, the app aborted (SIGABRT) on exit since Qt's QThread
+    destructor fatals if destroyed while still running."""
+    monkeypatch.setattr(devices_module, "cv2", type("cv2", (), {"VideoCapture": _HangingVideoCapture}))
+    monkeypatch.setattr(devices_module, "PROBE_TIMEOUT_S", 0.3)
+
+    start = time.monotonic()
+    result = devices_module._probe_indices()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0, f"scan took {elapsed:.2f}s, should be bounded near PROBE_TIMEOUT_S"
+    assert all(device.device != 0 for device in result)  # hung index excluded
+    assert any(device.device == 1 for device in result)  # other indices still reported
+
+
+def test_probe_indices_total_time_bounded_regardless_of_hung_count(monkeypatch):
+    """Multiple hung indices must not add up (N * PROBE_TIMEOUT_S) --
+    they're joined against one shared deadline, not timed out one at a
+    time."""
+
+    class _AllHangingVideoCapture:
+        def __init__(self, index: int):
+            time.sleep(5.0)
+
+        def isOpened(self) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(devices_module, "cv2", type("cv2", (), {"VideoCapture": _AllHangingVideoCapture}))
+    monkeypatch.setattr(devices_module, "PROBE_TIMEOUT_S", 0.3)
+
+    start = time.monotonic()
+    result = devices_module._probe_indices()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0, f"scan took {elapsed:.2f}s -- looks like timeouts summed instead of sharing a deadline"
+    assert result == []

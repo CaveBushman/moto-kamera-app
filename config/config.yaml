@@ -24,7 +24,8 @@ ai:
   canary_max_errors: 3
   canary_compare_dot: true
   canary_compare_log_interval_s: 1.0
-  target_class: cyclist
+  target_class: bicycle   # stock COCO model has no "cyclist" class -- swap
+                            # to "cyclist" once a custom-trained HEF is in use
   dot_min_area: 12
   dot_max_area_ratio: 0.08
   dot_box_pad: 22

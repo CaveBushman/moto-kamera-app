@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout,
 from motocam.ai.ai_engine import AiEngine, NullDetector
 from motocam.ai.ai_worker import AiWorker
 from motocam.ai.hailo_detector import build_detector
+from motocam.ai.training_capture import TrainingDataCapture
 from motocam.audio.ptt_engine import SAMPLE_RATE, PttEngine
 from motocam.audio.talkback_player import TalkbackPlayer
 from motocam.camera.base import CameraController
@@ -206,6 +207,20 @@ class MainWindow(QMainWindow):
             if bool(encoder_cfg.get("enabled", False))
             else None
         )
+        # Operator-confirmed tracking boxes saved as YOLO training
+        # examples for a future custom cyclist model -- opt-in, off by
+        # default (see training_capture.py's module docstring).
+        capture_cfg = (self._config.get("ai") or {}).get("training_capture") or {}
+        self.training_capture = (
+            TrainingDataCapture(
+                output_dir=capture_cfg.get("output_dir", "data/training_capture"),
+                interval_s=float(capture_cfg.get("interval_s", 2.0)),
+                label=capture_cfg.get("label", "cyclist"),
+                min_free_disk_mb=float(capture_cfg.get("min_free_disk_mb", 500)),
+            )
+            if bool(capture_cfg.get("enabled", False))
+            else None
+        )
         self._last_frame: np.ndarray | None = None
         self._preview_streaming = False
         self._preview_bytes_accum = 0
@@ -370,6 +385,7 @@ class MainWindow(QMainWindow):
             self.ai_worker.max_input_width,
             self.ai_worker.performance_budget_pct,
         )
+        self._settings.set_training_capture_enabled(self.training_capture is not None)
         self._settings.set_safety_values(self._ride_lock_enabled, self._ride_lock_speed_kmh)
         self._settings.exec()
 
@@ -419,6 +435,7 @@ class MainWindow(QMainWindow):
         self._settings.ai_max_fps_changed.connect(self._on_ai_max_fps_changed)
         self._settings.ai_max_input_width_changed.connect(self._on_ai_max_input_width_changed)
         self._settings.ai_performance_budget_changed.connect(self._on_ai_performance_budget_changed)
+        self._settings.training_capture_toggled.connect(self._on_training_capture_toggled)
 
         self._settings.connection_apply_requested.connect(self._on_connection_apply)
         self._settings.camera_apply_requested.connect(self._on_camera_address_apply)
@@ -707,6 +724,11 @@ class MainWindow(QMainWindow):
                 self.tracker.select_box(frame, (target.x, target.y, target.w, target.h))
                 self.pid.reset()
         self.preview.set_bbox(self.tracker.bbox, self.tracker.state.value)
+        if self.training_capture is not None and self.tracker.state == TargetState.LOCKED:
+            # LOCKED only (not WEAK/coasting): the box is a fresh
+            # confirmation this frame, not a Kalman-predicted guess during
+            # occlusion -- see training_capture.py's module docstring.
+            self.training_capture.maybe_capture(frame, self.tracker.bbox)
         self.preview.update_frame(frame)
         preview_submit_ms = (time.monotonic() - checkpoint) * 1000.0
         checkpoint = time.monotonic()
@@ -1302,6 +1324,26 @@ class MainWindow(QMainWindow):
         self.ai_worker.set_performance_budget_pct(budget_pct)
         self._config.setdefault("ai", {})["performance_budget_pct"] = budget_pct
         self._save_config()
+
+    def _on_training_capture_toggled(self, enabled: bool) -> None:
+        capture_cfg = self._config.setdefault("ai", {}).setdefault("training_capture", {})
+        capture_cfg["enabled"] = enabled
+        self._save_config()
+        if not enabled:
+            if self.training_capture is not None:
+                logger.info(
+                    "Training data capture disabled (%d examples saved this session)",
+                    self.training_capture.captured_count,
+                )
+            self.training_capture = None
+            return
+        self.training_capture = TrainingDataCapture(
+            output_dir=capture_cfg.get("output_dir", "data/training_capture"),
+            interval_s=float(capture_cfg.get("interval_s", 2.0)),
+            label=capture_cfg.get("label", "cyclist"),
+            min_free_disk_mb=float(capture_cfg.get("min_free_disk_mb", 500)),
+        )
+        logger.info("Training data capture enabled -> %s", self.training_capture.output_dir)
 
     def _on_connection_apply(self, unit_id: str, control_room_url: str) -> None:
         self.unit_id = unit_id

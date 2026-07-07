@@ -115,6 +115,7 @@ class SettingsDialog(QDialog):
     ai_max_fps_changed = pyqtSignal(float)
     ai_max_input_width_changed = pyqtSignal(int)
     ai_performance_budget_changed = pyqtSignal(float)
+    training_capture_toggled = pyqtSignal(bool)
 
     connection_apply_requested = pyqtSignal(str, str)  # (unit_id, control_room_url)
     camera_apply_requested = pyqtSignal(str, int)  # (ip, port)
@@ -883,6 +884,21 @@ class SettingsDialog(QDialog):
         self.max_tilt_speed_spin.valueChanged.connect(self._emit_max_speed)
         form.addRow("Max tilt speed", self.max_tilt_speed_spin)
 
+        capture_hint = QLabel(
+            "While ON, every LOCKED tracking frame (a rider you tapped, or "
+            "FULL AI auto-acquired) is saved to disk as training data for a "
+            "future custom cyclist model -- the box you're confirming right "
+            "now, not the interim model's own bicycle/person guess. See "
+            "docs/HAILO_CYCLIST_MODEL.md."
+        )
+        capture_hint.setWordWrap(True)
+        outer.addWidget(capture_hint)
+        self.training_capture_checkbox = QCheckBox("Collect AI training data while tracking")
+        self.training_capture_checkbox.toggled.connect(self.training_capture_toggled.emit)
+        form2 = self._new_form_layout()
+        outer.addLayout(form2)
+        form2.addRow(self.training_capture_checkbox)
+
         return group
 
     def set_tracking_values(
@@ -907,6 +923,11 @@ class SettingsDialog(QDialog):
             spin.blockSignals(True)
             spin.setValue(value)
             spin.blockSignals(False)
+
+    def set_training_capture_enabled(self, enabled: bool) -> None:
+        self.training_capture_checkbox.blockSignals(True)
+        self.training_capture_checkbox.setChecked(enabled)
+        self.training_capture_checkbox.blockSignals(False)
 
     def _emit_dead_zone(self) -> None:
         self.dead_zone_changed.emit(self.dead_zone_x_spin.value(), self.dead_zone_y_spin.value())

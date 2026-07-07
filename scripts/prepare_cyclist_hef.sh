@@ -16,19 +16,29 @@ if [[ ! -f "$SRC" ]]; then
   exit 1
 fi
 
-mkdir -p /motocam/ai/models
-cp "$SRC" /motocam/ai/models/cyclist.hef
+DEST="$REPO/models/cyclist.hef"
+mkdir -p "$REPO/models"
+cp "$SRC" "$DEST"
 
-echo "Installed HEF: /motocam/ai/models/cyclist.hef"
+echo "Installed HEF: $DEST"
 
-python3 - <<'PY'
+python3 - "$DEST" <<'PY'
 from pathlib import Path
 import re
+import sys
 
+dest = sys.argv[1]
 path = Path('config/config.yaml')
 text = path.read_text()
-text = re.sub(r'(\s*model:\s*).+', r'\1/motocam/ai/models/cyclist.hef', text, count=1)
-text = re.sub(r'(\s*target_class:\s*).+', r'\1cyclist', text, count=1)
+# Absolute path, not a repo-relative one: resolve_hef_path() only resolves
+# a relative model path against config.yaml's own directory, and this app
+# is normally launched with cwd=motocam/ (one level below the repo root
+# models/ actually lives in) -- a relative path here would silently
+# resolve to the wrong, nonexistent location. Scoped to the ai: block's
+# own model:/target_class: lines (indented under it), not the first match
+# anywhere in the file, so an unrelated top-level key can never be hit.
+text = re.sub(r'(?m)^(ai:\n(?:  .*\n)*?  model:\s*).+$', rf'\1{dest}', text, count=1)
+text = re.sub(r'(?m)^(ai:\n(?:  .*\n)*?  target_class:\s*).+$', r'\1cyclist', text, count=1)
 path.write_text(text)
 PY
 

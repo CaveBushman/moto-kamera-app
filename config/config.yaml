@@ -24,12 +24,18 @@ ai:
   canary_max_errors: 3
   canary_compare_dot: true
   canary_compare_log_interval_s: 1.0
-  target_class: bicycle   # stock COCO model has no "cyclist" class -- swap
-                            # to "cyclist" once a custom-trained HEF is in use
+  target_class: bicycle   # stock COCO model has no "cyclist" class; scripts/prepare_cyclist_hef.sh switches this to "cyclist"
   dot_min_area: 12
   dot_max_area_ratio: 0.08
   dot_box_pad: 22
   labels: null
+  training_capture:
+    enabled: false   # save operator-confirmed LOCKED tracking boxes as
+                      # YOLO training data -- see docs/HAILO_CYCLIST_MODEL.md
+    output_dir: data/training_capture
+    interval_s: 2.0
+    label: cyclist
+    min_free_disk_mb: 500
 tracking:
   algorithm: kcf
   max_input_width: 416

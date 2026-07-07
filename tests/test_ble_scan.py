@@ -128,3 +128,37 @@ def test_locked_scan_for_device_does_not_deadlock_on_the_adapter_lock():
 
     address = asyncio.run(run())
     assert address == "AA:BB"
+
+
+# -- unnamed peripherals never reach the operator ---------------------------
+class _FakeScannedDevice:
+    def __init__(self, name, address, rssi=-50):
+        self.name = name
+        self.address = address
+        self.rssi = rssi
+
+
+def test_discover_drops_devices_with_no_advertised_name(monkeypatch):
+    # The gimbal always advertises a real name, so an unnamed peripheral
+    # can never be a match anyway -- and routinely outnumbers named ones
+    # several to one in a crowded RF environment. Dropped at the source
+    # (not just hidden by the Settings UI) so nothing downstream (name
+    # matching, the manual scan list) ever sees a placeholder like
+    # "Unknown BLE device".
+    scanned = [
+        _FakeScannedDevice(name="DJI RS4 PRO-094PP0", address="AA:BB:CC:DD:EE:FF"),
+        _FakeScannedDevice(name="", address="11:22:33:44:55:66"),
+        _FakeScannedDevice(name=None, address="22:33:44:55:66:77"),
+        _FakeScannedDevice(name="   ", address="33:44:55:66:77:88"),
+    ]
+
+    class _FakeScanner:
+        @staticmethod
+        async def discover(timeout):
+            return scanned
+
+    monkeypatch.setattr(dji_rs4pro, "BleakScanner", _FakeScanner)
+
+    infos = asyncio.run(dji_rs4pro._discover_ble_device_infos(timeout_s=1.0))
+
+    assert [info.address for info in infos] == ["AA:BB:CC:DD:EE:FF"]

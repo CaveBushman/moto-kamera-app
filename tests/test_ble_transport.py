@@ -241,6 +241,34 @@ def test_connect_client_retries_with_scan_after_direct_address_failure(monkeypat
     assert attempts == ["configured-address", "scan", "scanned-address"]
 
 
+def test_connect_client_remembers_scanned_address_for_next_reconnect(monkeypatch):
+    """A stale configured address (e.g. saved from a different machine --
+    macOS's CoreBluetooth address for a peripheral is a per-machine UUID,
+    not its real MAC) must not be retried forever: once a scan-fallback
+    connect succeeds, that address becomes the new self.address so the
+    *next* reconnect (a mid-ride BLE drop, say) tries it directly instead
+    of burning a full scan_timeout_s on the same doomed guess again."""
+    transport = BleTransport(address="stale-address")
+
+    async def fake_scan(*_args, **_kwargs):
+        return "real-address"
+
+    class FakeClient:
+        def __init__(self, target: str):
+            self.target = target
+
+        async def connect(self, timeout: float):
+            if self.target != "real-address":
+                raise RuntimeError("device not found")
+
+    monkeypatch.setattr("motocam.gimbal.dji_rs4pro.BleakClient", FakeClient)
+    monkeypatch.setattr(transport, "_scan_for_device", fake_scan)
+
+    asyncio.run(transport._connect_client_with_retry())
+
+    assert transport.address == "real-address"
+
+
 def test_on_notify_enqueues_bytes_from_callback_thread():
     async def run_case():
         transport = BleTransport(address="x")

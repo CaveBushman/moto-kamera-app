@@ -212,7 +212,14 @@ async def _discover_ble_device_infos(timeout_s: float) -> list[BleDeviceInfo]:
     already hold _BLE_ADAPTER_LOCK (e.g. BleTransport._scan_for_device, from
     inside BleTransport.open()'s own locked section) must call this
     directly rather than the public scan_ble_devices() below, or they would
-    deadlock re-acquiring the (non-reentrant) lock."""
+    deadlock re-acquiring the (non-reentrant) lock.
+
+    Devices with no advertised name are dropped here, not just cosmetically
+    hidden by the Settings UI: the gimbal always advertises a real name, so
+    an unnamed peripheral can never be a match for _scan_for_device's
+    name-filter logic either -- keeping it around only clutters the manual
+    "SCAN BLE DEVICES" list (unnamed devices routinely outnumber named ones
+    several to one in a crowded RF environment)."""
     assert BleakScanner is not None
     devices = await BleakScanner.discover(timeout=timeout_s)
     infos: list[BleDeviceInfo] = []
@@ -220,7 +227,9 @@ async def _discover_ble_device_infos(timeout_s: float) -> list[BleDeviceInfo]:
         address = str(getattr(device, "address", "") or "").strip()
         if not address:
             continue
-        name = str(getattr(device, "name", "") or "").strip() or "Unknown BLE device"
+        name = str(getattr(device, "name", "") or "").strip()
+        if not name:
+            continue
         rssi = getattr(device, "rssi", None)
         infos.append(BleDeviceInfo(name=name, address=address, rssi=rssi if isinstance(rssi, int) else None))
     return infos
@@ -351,13 +360,25 @@ class BleTransport:
     async def _connect_client_with_retry(self) -> Any:
         """Attempt BLE connection, retrying with a fresh scan if the first
         direct-by-address connect fails and the device is still becoming
-        visible after an app restart."""
+        visible after an app restart.
+
+        A configured `self.address` can be permanently stale (not just
+        "not visible yet"): macOS's CoreBluetooth address for a peripheral
+        is a per-machine UUID, not the peripheral's real MAC, so a
+        ble_address saved from one machine's config is never valid on
+        another -- every single reconnect would otherwise burn a full
+        scan_timeout_s on a doomed attempt 0 before falling back. Once a
+        scan-fallback connect succeeds, remember that address so the
+        *next* reconnect (e.g. after a mid-ride BLE drop) tries it
+        directly first instead of repeating the failed guess forever."""
         async with _BLE_ADAPTER_LOCK:
             for attempt in range(2):
                 target = self.address if attempt == 0 else await self._scan_for_device(locked=True)
                 client = BleakClient(target)
                 try:
                     await client.connect(timeout=self.scan_timeout_s)
+                    if attempt == 1:
+                        self.address = target
                     return client
                 except Exception as exc:  # noqa: BLE001
                     if attempt == 1:

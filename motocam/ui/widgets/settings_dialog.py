@@ -632,21 +632,28 @@ class SettingsDialog(QDialog):
             self.ble_scan_status_label.setText(error)
             return
 
+        # Drop unnamed peripherals: the gimbal always advertises a real
+        # name (see ble_name in config/Settings above), so an "Unknown BLE
+        # device" entry can never be the one the operator is looking for
+        # -- it only adds noise (and often outnumbers the real, named
+        # devices several to one in a crowded RF environment).
+        named_devices = [device for device in devices if (getattr(device, "name", "") or "").strip()]
+
         current_address = self.ble_address_edit.text().strip()
         self.ble_device_combo.blockSignals(True)
         self.ble_device_combo.clear()
-        if not devices:
-            self.ble_device_combo.addItem("No BLE devices found", None)
-            self.ble_scan_status_label.setText("No BLE devices found.")
+        if not named_devices:
+            self.ble_device_combo.addItem("No named BLE devices found", None)
+            self.ble_scan_status_label.setText("No named BLE devices found.")
         else:
             self.ble_device_combo.addItem("Select BLE device", None)
-            for device in devices:
-                name = getattr(device, "name", "") or "Unknown BLE device"
+            for device in named_devices:
+                name = device.name.strip()
                 address = getattr(device, "address", "") or ""
                 rssi = getattr(device, "rssi", None)
                 suffix = f" ({rssi} dBm)" if rssi is not None else ""
                 self.ble_device_combo.addItem(f"{name} - {address}{suffix}", {"name": name, "address": address})
-            self.ble_scan_status_label.setText(f"{len(devices)} BLE device(s) found.")
+            self.ble_scan_status_label.setText(f"{len(named_devices)} named BLE device(s) found.")
         selected = 0
         if current_address:
             for index in range(self.ble_device_combo.count()):

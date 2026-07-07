@@ -319,16 +319,12 @@ class BleTransport:
         if self._client is not None and getattr(self._client, "is_connected", False):
             return
 
-        async def _connect():
+        async def _connect() -> Any:
             # Scanning (if no explicit address) and the connect itself both
             # share _BLE_ADAPTER_LOCK with scan_ble_devices() -- on BlueZ a
             # direct-by-address connect can still trigger adapter-side
             # discovery, so it must not overlap with a manual scan either.
-            async with _BLE_ADAPTER_LOCK:
-                target = self.address or await self._scan_for_device(locked=True)
-                client = BleakClient(target)
-                await client.connect(timeout=self.scan_timeout_s)
-                return client
+            return await self._connect_client_with_retry()
 
         self._client = await _retry_bluez_in_progress(_connect)
         await self._adopt_negotiated_mtu()
@@ -351,6 +347,24 @@ class BleTransport:
             self._endpoint.write_with_response,
             self.mtu_payload_bytes,
         )
+
+    async def _connect_client_with_retry(self) -> Any:
+        """Attempt BLE connection, retrying with a fresh scan if the first
+        direct-by-address connect fails and the device is still becoming
+        visible after an app restart."""
+        async with _BLE_ADAPTER_LOCK:
+            for attempt in range(2):
+                target = self.address if attempt == 0 else await self._scan_for_device(locked=True)
+                client = BleakClient(target)
+                try:
+                    await client.connect(timeout=self.scan_timeout_s)
+                    return client
+                except Exception as exc:  # noqa: BLE001
+                    if attempt == 1:
+                        raise
+                    logger.info("BLE connect to %s failed (%s); retrying after a fresh scan", target, exc)
+                    await asyncio.sleep(0.25)
+        raise RuntimeError("BLE connect target could not be resolved")
 
     async def _adopt_negotiated_mtu(self) -> None:
         """Raise mtu_payload_bytes to the connection's actual negotiated ATT

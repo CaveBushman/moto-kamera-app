@@ -213,6 +213,34 @@ def test_send_without_open_raises():
         asyncio.run(transport.send(b"\x01\x02"))
 
 
+def test_connect_client_retries_with_scan_after_direct_address_failure(monkeypatch):
+    transport = BleTransport(address="configured-address")
+    attempts: list[str] = []
+
+    async def fake_scan(*_args, **_kwargs):
+        attempts.append("scan")
+        return "scanned-address"
+
+    class FakeClient:
+        def __init__(self, target: str):
+            self.target = target
+            self.connected = False
+
+        async def connect(self, timeout: float):
+            attempts.append(self.target)
+            if self.target == "configured-address":
+                raise RuntimeError("device not found")
+            self.connected = True
+
+    monkeypatch.setattr("motocam.gimbal.dji_rs4pro.BleakClient", FakeClient)
+    monkeypatch.setattr(transport, "_scan_for_device", fake_scan)
+
+    client = asyncio.run(transport._connect_client_with_retry())
+
+    assert client.target == "scanned-address"
+    assert attempts == ["configured-address", "scan", "scanned-address"]
+
+
 def test_on_notify_enqueues_bytes_from_callback_thread():
     async def run_case():
         transport = BleTransport(address="x")

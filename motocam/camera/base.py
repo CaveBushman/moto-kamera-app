@@ -22,6 +22,11 @@ class CameraState:
 
 
 class CameraBackend(ABC):
+    """Talks to the physical camera (e.g. camera/bmd_rest_camera.py's
+    Blackmagic REST API backend, or camera/mock_camera.py for dev without
+    hardware). CameraController (below) is the backend-agnostic front the
+    rest of the app uses."""
+
     @abstractmethod
     async def connect(self) -> None: ...
 
@@ -61,6 +66,9 @@ class CameraBackend(ABC):
 
 
 class CameraController:
+    """Owns the published CameraState and reconnect/error handling so UI
+    code can fire commands without try/except around every button press."""
+
     def __init__(self, backend: CameraBackend):
         self.backend = backend
         self.state = CameraState()

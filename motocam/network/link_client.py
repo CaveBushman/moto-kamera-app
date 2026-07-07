@@ -29,6 +29,13 @@ LOG_DRAIN_BATCH_MAX = 100
 
 
 class LinkClient(QObject):
+    """Owns the WebSocket connection to the control room's link_server.py.
+    Telemetry/preview sends coalesce to "latest wins" the same way the
+    gimbal joystick path does (see DjiRs4ProBackend) -- a slow send never
+    queues a backlog, it just gets superseded. Log events queue instead
+    (send_log_event/_drain_log_queue) since operators expect to see every
+    log line, not just the latest."""
+
     connected_changed = pyqtSignal(bool)
     command_received = pyqtSignal(str, dict)  # (MessageType value, payload)
     error_received = pyqtSignal(str, str)  # code, message

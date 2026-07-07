@@ -33,6 +33,10 @@ def stall_ms(expected_interval_ms: float, actual_delta_ms: float, tolerance_ms: 
 
 
 class UiLatencyWatchdog(QObject):
+    """Started once in main.py; logs a warning whenever the Qt UI thread
+    stalls (see module docstring). `context_provider` optionally attaches
+    a pipeline diagnostics summary to each stall log line."""
+
     def __init__(
         self,
         interval_ms: int = 250,

@@ -368,7 +368,9 @@ class HailoCanaryDetector:
     stays controllable while we collect logs and tune the HEF path.
     """
 
-    source = "hailo_canary"
+    # No plain class attribute here (unlike the other detectors below):
+    # `source` must reflect live fallback state, so it's the `@property`
+    # further down, not a static string.
 
     def __init__(
         self,
@@ -511,12 +513,15 @@ def _center(det: Detection) -> tuple[float, float]:
 
 
 def _best_detection(detections: list[Detection]) -> Detection | None:
+    """Highest-confidence detection, used when there's no dot to anchor against."""
     if not detections:
         return None
     return max(detections, key=lambda det: det.confidence)
 
 
 def _nearest_detection(detections: list[Detection], reference: Detection | None) -> Detection | None:
+    """Closest detection to `reference`'s center -- pairs the Hailo box
+    with the dot box in HAILO_COMPARE logging (_log_hailo_against_dot)."""
     if not detections:
         return None
     if reference is None:

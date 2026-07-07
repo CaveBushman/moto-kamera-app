@@ -1,4 +1,8 @@
-"""Top status bar: CAM | GIMBAL | GPS | LINK | REC | AI | FPS | LATENCY (design doc 11)."""
+"""Top status bar: GIMBAL | GPS | CTRL | REC | AI | ENC (design doc 11) --
+only the chips that are safety/broadcast-critical to glance at while
+riding. VIDEO/BMD/ATEM/FPS/LAT moved to the collapsible CAM/GIMBAL HUD
+diagnostics strip once this bar started running out of room (see
+ui/main_window.py._build_ui)."""
 from __future__ import annotations
 
 from PyQt6.QtCore import QTimer, Qt
@@ -10,6 +14,11 @@ BLINK_INTERVAL_MS = 500
 
 
 class StatusChip(QLabel):
+    """One label/value pill in TopBar (e.g. "GIMBAL" / "OK"). Font sizes
+    are computed from the chip's actual on-screen geometry (_render), not
+    fixed, so the bar stays readable across window sizes/UI scale without
+    clipping the value text."""
+
     def __init__(self, label: str):
         super().__init__(label)
         self._label = label
@@ -116,6 +125,10 @@ class StatusChip(QLabel):
 
 
 class TopBar(QWidget):
+    """Row of StatusChips (see module docstring for the chip list) plus
+    the unit badge and federation logo. ui/main_window.py owns updating
+    each chip's state/text as telemetry changes."""
+
     def __init__(self):
         super().__init__()
         self.setObjectName("topBar")
@@ -135,28 +148,28 @@ class TopBar(QWidget):
         layout.addWidget(self.unit_label)
         self.set_unit_id("moto-1")
 
-        # "VIDEO" = the UVC/V4L2 preview feed (grabber); "BMD" = the
-        # Blackmagic Camera Control REST link (PYXIS, Studio Cameras, Micro
-        # Studio Camera 4K G2, ... -- same generic REST API, so the chip
-        # isn't named after one specific camera). They are independent --
-        # you can have camera control up with no video grabber, or vice
-        # versa -- so they get separate chips (previously only video had
-        # one, labelled "CAM", which read as the camera control link and
-        # caused confusion).
-        self.cam_chip = StatusChip("VIDEO")
-        self.bmd_chip = StatusChip("BMD")
+        # Top bar holds only what's safety/broadcast-critical to glance at
+        # while riding (design doc 11.1/24.4): is the gimbal alive, do we
+        # have GPS, are we recording, is AI tracking working, are we
+        # actually ON AIR, is the control room even hearing from us.
+        # Everything else (VIDEO/BMD/ATEM/FPS/LAT -- useful for setup and
+        # troubleshooting, not something you need mid-corner) moved to the
+        # collapsible CAM/GIMBAL HUD diagnostics strip (see
+        # ui/main_window.py._build_ui) once this bar started running out
+        # of room for a 6th+ chip.
         self.gimbal_chip = StatusChip("GIMBAL")
         self.gps_chip = StatusChip("GPS")
         self.net_chip = StatusChip("CTRL")
-        self.switcher_chip = StatusChip("ATEM")
         self.rec_chip = StatusChip("REC")
         self.ai_chip = StatusChip("AI")
-        self.fps_chip = StatusChip("FPS")
-        self.latency_chip = StatusChip("LAT")
+        # ON AIR / bitrate state from the Blackmagic Streaming Encoder
+        # (broadcast uplink from the bike, motocam/encoder/streaming_encoder.py)
+        # -- separate hardware from the BMD camera control link (bmd_chip,
+        # now in the HUD strip), so it gets its own chip.
+        self.encoder_chip = StatusChip("ENC")
 
         for chip in (
-            self.cam_chip, self.bmd_chip, self.gimbal_chip, self.gps_chip, self.net_chip,
-            self.switcher_chip, self.rec_chip, self.ai_chip, self.fps_chip, self.latency_chip,
+            self.gimbal_chip, self.gps_chip, self.net_chip, self.rec_chip, self.ai_chip, self.encoder_chip,
         ):
             layout.addWidget(chip, stretch=1)  # chips share the width evenly and fill the bar
         layout.addWidget(LogoWidget(height=30))

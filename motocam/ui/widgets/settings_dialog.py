@@ -59,6 +59,7 @@ GPS_BAUDRATES = [
 ]
 DEFAULT_CONTROL_ROOM_PORT = 8765
 DEFAULT_CAMERA_REST_PORT = 80
+DEFAULT_ENCODER_PORT = 80
 
 
 class DeviceScanWorker(QThread):
@@ -94,6 +95,14 @@ class DeviceScanWorker(QThread):
 
 
 class SettingsDialog(QDialog):
+    """Every field the operator can change live, in one dialog (see module
+    docstring). Emits one signal per apply action rather than a single
+    generic "settings changed" event, so ui/main_window.py's handlers
+    (`_on_camera_address_apply`, `_on_gimbal_apply`, etc.) stay small and
+    map 1:1 to what the operator actually pressed -- values are read
+    straight from the widgets, this dialog holds no separate settings
+    state of its own."""
+
     iso_changed = pyqtSignal(int)
     white_balance_changed = pyqtSignal(int)
     shutter_changed = pyqtSignal(str)
@@ -109,6 +118,7 @@ class SettingsDialog(QDialog):
 
     connection_apply_requested = pyqtSignal(str, str)  # (unit_id, control_room_url)
     camera_apply_requested = pyqtSignal(str, int)  # (ip, port)
+    encoder_apply_requested = pyqtSignal(bool, str, int)  # (enabled, ip, port)
     gps_apply_requested = pyqtSignal(str, object)  # (device, baudrate)
     audio_apply_requested = pyqtSignal(object, object)  # input_device, output_device
     video_device_apply_requested = pyqtSignal(object)  # device (int index or /dev/videoN path)
@@ -166,6 +176,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self._build_audio_group())
         layout.addWidget(self._build_gimbal_group())
         layout.addWidget(self._build_camera_group())
+        layout.addWidget(self._build_encoder_group())
         layout.addWidget(self._build_tracking_group())
         layout.addWidget(self._build_safety_group())
         layout.addStretch(1)
@@ -741,6 +752,52 @@ class SettingsDialog(QDialog):
         if not ip:
             return
         self.camera_apply_requested.emit(ip, self.camera_port_spin.value())
+
+    # -- streaming encoder ------------------------------------------------------
+    def _build_encoder_group(self) -> QGroupBox:
+        group = QGroupBox("STREAMING ENCODER")
+        outer = QVBoxLayout(group)
+
+        note = QLabel(
+            "Blackmagic Streaming Encoder broadcast uplink from the bike -- "
+            "separate device from the camera above. Optional: leave disabled "
+            "if none is fitted to this unit."
+        )
+        note.setWordWrap(True)
+        outer.addWidget(note)
+
+        form = self._new_form_layout()
+        outer.addLayout(form)
+
+        self.encoder_enabled_checkbox = QCheckBox("Monitor Streaming Encoder (ON AIR / bitrate / cache)")
+        form.addRow(self.encoder_enabled_checkbox)
+
+        self.encoder_ip_edit = QLineEdit()
+        self.encoder_ip_edit.setPlaceholderText("192.168.9.40")
+        form.addRow("Encoder IP", self.encoder_ip_edit)
+
+        self.encoder_port_spin = QSpinBox()
+        self.encoder_port_spin.setRange(1, 65535)
+        self.encoder_port_spin.setValue(DEFAULT_ENCODER_PORT)
+        form.addRow("Encoder port", self.encoder_port_spin)
+
+        encoder_apply_btn = QPushButton("SAVE ENCODER")
+        encoder_apply_btn.clicked.connect(self._emit_encoder_apply)
+        form.addRow(encoder_apply_btn)
+
+        return group
+
+    def set_encoder_values(self, enabled: bool, ip: str, port: int) -> None:
+        self.encoder_enabled_checkbox.setChecked(enabled)
+        self.encoder_ip_edit.setText(ip)
+        self.encoder_port_spin.setValue(port)
+
+    def _emit_encoder_apply(self) -> None:
+        self.encoder_apply_requested.emit(
+            self.encoder_enabled_checkbox.isChecked(),
+            self.encoder_ip_edit.text().strip(),
+            self.encoder_port_spin.value(),
+        )
 
     # -- AI tracking ------------------------------------------------------------
     def _build_tracking_group(self) -> QGroupBox:

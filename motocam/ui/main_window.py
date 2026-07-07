@@ -1,4 +1,21 @@
-"""Main application window (design doc 11)."""
+"""Main application window (design doc 11).
+
+MainWindow is the app's central orchestrator: it owns every hardware
+controller (gimbal/GimbalController, camera/CameraController,
+gps/GpsManager), the AI/tracking pipeline (AiEngine + AiWorker +
+TrackingEngine), the control-room link (LinkClient), and every top-level
+widget (TopBar, PreviewView, ModeBar, CameraPanel, GimbalPanel,
+SettingsDialog, StageBanner), then wires their signals/timers together.
+It does not implement device protocols itself -- that lives in the
+gimbal/camera/gps packages -- only the app-level policy of when to call
+them (control tick rate, AI suspend/resume guards, ride-lock, preview
+relay throttling) and how their state reaches the screen.
+
+The `# -- Section --` comments below mark the file's major regions
+(construction, signal wiring, video/tracking, manual drag, PTT, mode
+switching, PID loop, GPS/telemetry, control-room link, Settings) --
+search for those to navigate directly to the area you need.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -22,6 +39,7 @@ from motocam.core.config import save_config
 from motocam.core.protocol import (
     AiTelemetry,
     CameraTelemetry,
+    EncoderTelemetry,
     GimbalTelemetry,
     MessageType,
     NetworkTelemetry,
@@ -31,6 +49,7 @@ from motocam.core.protocol import (
     TargetState,
 )
 from motocam.core.telemetry_sources import is_fallback_source, source_value_display
+from motocam.encoder.streaming_encoder import STATUS_CHIP_STATE, StreamingEncoderMonitor
 from motocam.gimbal.base import GimbalController
 from motocam.gimbal.factory import build_gimbal_backend
 from motocam.gps.gps_manager import GpsManager
@@ -44,7 +63,7 @@ from motocam.ui.widgets.mode_bar import ModeBar
 from motocam.ui.widgets.preview_view import PreviewView
 from motocam.ui.widgets.settings_dialog import ISO_VALUES, SettingsDialog
 from motocam.ui.widgets.stage_banner import StageBanner
-from motocam.ui.widgets.top_bar import TopBar
+from motocam.ui.widgets.top_bar import StatusChip, TopBar
 from motocam.video.video_engine import VideoEngine
 from motocam.video.preview_relay import PreviewRelayEncoder, preview_interval_s, preview_jpeg_quality
 from motocam.watchdog.health import HealthMonitor
@@ -61,6 +80,10 @@ STATE_TO_CHIP = {
 
 
 class GpsReconfigureWorker(QThread):
+    """Opens a new GpsManager off the UI thread -- GpsManager.open() can
+    block for up to ~1.5s per candidate baud rate while autodetecting a
+    serial device, which would otherwise freeze Settings on apply."""
+
     completed = pyqtSignal(object)  # GpsManager
 
     def __init__(self, device: str, baudrate: int | str, parent=None):
@@ -174,6 +197,15 @@ class MainWindow(QMainWindow):
         )
         self.ptt_engine = PttEngine(input_device=audio_cfg.get("input_device"))
         self.talkback_player = TalkbackPlayer(output_device=audio_cfg.get("output_device"))
+        # Broadcast uplink from the bike -- separate device from the
+        # gimbal camera (encoder/streaming_encoder.py), optional and
+        # disabled unless configured, same as PTT above.
+        encoder_cfg = self._config.get("encoder") or {}
+        self.streaming_encoder = (
+            StreamingEncoderMonitor(ip=encoder_cfg.get("ip", ""), port=int(encoder_cfg.get("port", 80)))
+            if bool(encoder_cfg.get("enabled", False))
+            else None
+        )
         self._last_frame: np.ndarray | None = None
         self._preview_streaming = False
         self._preview_bytes_accum = 0
@@ -185,6 +217,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self._camera_refresh_task: asyncio.Task | None = None
+        self._encoder_refresh_task: asyncio.Task | None = None
         self._gimbal_refresh_task: asyncio.Task | None = None
         self._gimbal_connect_task: asyncio.Task | None = None
         self._gimbal_velocity_task: asyncio.Task | None = None
@@ -239,15 +272,39 @@ class MainWindow(QMainWindow):
         # #cameraPanel/#gimbalPanel).
         hud = QWidget()
         hud.setObjectName("previewHud")
-        panels_row = QHBoxLayout(hud)
-        panels_row.setContentsMargins(0, 0, 0, 0)
-        panels_row.setSpacing(12)
+        hud_layout = QVBoxLayout(hud)
+        hud_layout.setContentsMargins(0, 0, 0, 0)
+        hud_layout.setSpacing(8)
+
+        # Diagnostic chips (setup/troubleshooting, not glance-while-riding
+        # critical -- see top_bar.py's module docstring) live here instead
+        # of the top bar, which ran out of room once ENC joined the
+        # safety/broadcast-critical set.
+        diag_row = QWidget()
+        diag_layout = QHBoxLayout(diag_row)
+        diag_layout.setContentsMargins(0, 0, 0, 0)
+        diag_layout.setSpacing(8)
+        self.video_chip = StatusChip("VIDEO")
+        self.bmd_chip = StatusChip("BMD")
+        self.switcher_chip = StatusChip("ATEM")
+        self.fps_chip = StatusChip("FPS")
+        self.latency_chip = StatusChip("LAT")
+        for chip in (self.video_chip, self.bmd_chip, self.switcher_chip, self.fps_chip, self.latency_chip):
+            diag_layout.addWidget(chip, stretch=1)
+        hud_layout.addWidget(diag_row)
+
+        panels_row = QWidget()
+        panels_layout = QHBoxLayout(panels_row)
+        panels_layout.setContentsMargins(0, 0, 0, 0)
+        panels_layout.setSpacing(12)
         self.camera_panel = CameraPanel()
         self.gimbal_panel = GimbalPanel()
         self.camera_panel.setMaximumHeight(270)
         self.gimbal_panel.setMaximumHeight(270)
-        panels_row.addWidget(self.camera_panel, stretch=1)
-        panels_row.addWidget(self.gimbal_panel, stretch=1)
+        panels_layout.addWidget(self.camera_panel, stretch=1)
+        panels_layout.addWidget(self.gimbal_panel, stretch=1)
+        hud_layout.addWidget(panels_row)
+
         self.preview.set_hud_widget(hud)
         # Glove-friendly thumb controls (design doc 11.1/12.3): the
         # PTT/zoom/joystick default sizes felt small on the real Pi
@@ -295,6 +352,12 @@ class MainWindow(QMainWindow):
         # streaming port -- that is the only port the camera control uses.
         rest_port = int(self._config.get("camera", {}).get("rest_port", 80))
         self._settings.set_camera_address_values(self.camera_ip, rest_port)
+        encoder_cfg = self._config.get("encoder") or {}
+        self._settings.set_encoder_values(
+            self.streaming_encoder is not None,
+            self.streaming_encoder.ip if self.streaming_encoder is not None else encoder_cfg.get("ip", ""),
+            self.streaming_encoder.port if self.streaming_encoder is not None else int(encoder_cfg.get("port", 80)),
+        )
         self._settings.set_camera_values(
             self.camera.state.iso, self.camera.state.white_balance,
             self.camera.state.shutter, self.camera.state.iris,
@@ -359,6 +422,7 @@ class MainWindow(QMainWindow):
 
         self._settings.connection_apply_requested.connect(self._on_connection_apply)
         self._settings.camera_apply_requested.connect(self._on_camera_address_apply)
+        self._settings.encoder_apply_requested.connect(self._on_encoder_apply)
         self._settings.gps_apply_requested.connect(self._on_gps_apply)
         self._settings.audio_apply_requested.connect(self._on_audio_apply)
         self._settings.video_device_apply_requested.connect(self._on_video_device_apply)
@@ -462,6 +526,7 @@ class MainWindow(QMainWindow):
     def _cancel_background_tasks(self) -> None:
         for attr_name in (
             "_camera_refresh_task",
+            "_encoder_refresh_task",
             "_gimbal_refresh_task",
             "_gimbal_connect_task",
             "_gimbal_velocity_task",
@@ -783,11 +848,11 @@ class MainWindow(QMainWindow):
 
     def _on_fps(self, fps: float) -> None:
         self.health.set_video_fps(fps)
-        self.top_bar.fps_chip.set_state("ok" if fps > 20 else "warn", f"FPS {fps:.0f}")
+        self.fps_chip.set_state("ok" if fps > 20 else "warn", f"FPS {fps:.0f}")
 
     def _on_video_status(self, status: str) -> None:
         state = {"connected": "ok", "synthetic": "warn", "reconnecting": "warn", "lost": "bad"}.get(status, "idle")
-        self.top_bar.cam_chip.set_state(state, f"VIDEO {status.upper()}")
+        self.video_chip.set_state(state, f"VIDEO {status.upper()}")
 
     def _on_tap(self, x: int, y: int) -> None:
         if self._last_frame is not None:
@@ -958,6 +1023,8 @@ class MainWindow(QMainWindow):
     def _async_refresh_tick(self) -> None:
         if self._hardware_connect_enabled:
             self._schedule_unique_task("_camera_refresh_task", "camera refresh", self.camera.refresh)
+            if self.streaming_encoder is not None:
+                self._schedule_unique_task("_encoder_refresh_task", "encoder refresh", self.streaming_encoder.refresh)
             if self.gimbal.connected:
                 self._schedule_unique_task(
                     "_gimbal_refresh_task",
@@ -972,10 +1039,11 @@ class MainWindow(QMainWindow):
         # Blackmagic Camera Control REST link status (independent of the VIDEO grabber).
         # Mock camera backend always reports connected; the real Blackmagic
         # backend reflects the live /system probe.
-        self.top_bar.bmd_chip.set_state(
+        self.bmd_chip.set_state(
             "ok" if self.camera.connected else "bad",
             "OK" if self.camera.connected else "DOWN",
         )
+        self._sync_encoder_chip()
         self.preview.exposure_rocker.set_value_text(
             str(self.camera.state.iso) if self.camera.state.iso is not None else "--"
         )
@@ -991,6 +1059,25 @@ class MainWindow(QMainWindow):
             self.top_bar.rec_chip.set_blinking(False)
             self.top_bar.rec_chip.set_state("idle", "REC")
         self.preview.set_recording(self.camera.state.recording)
+
+    def _sync_encoder_chip(self) -> None:
+        """Streaming Encoder ON AIR/bitrate status (top_bar.encoder_chip) --
+        same blink-while-live treatment as rec_chip above, since ON AIR is
+        just as broadcast-critical as local recording."""
+        if self.streaming_encoder is None:
+            self.top_bar.encoder_chip.set_state("idle", "OFF")
+            return
+        status = self.streaming_encoder.status
+        if not status.connected:
+            self.top_bar.encoder_chip.set_blinking(False)
+            self.top_bar.encoder_chip.set_state("bad", "DOWN")
+            return
+        if status.on_air:
+            self.top_bar.encoder_chip.set_blinking(True, text="● ON AIR")
+        else:
+            self.top_bar.encoder_chip.set_blinking(False)
+            chip_state = STATUS_CHIP_STATE.get(status.status, "idle")
+            self.top_bar.encoder_chip.set_state(chip_state, status.status.upper())
 
     async def _gimbal_watchdog_refresh(self) -> None:
         if not await self.gimbal.check_connection():
@@ -1047,6 +1134,12 @@ class MainWindow(QMainWindow):
                 camera=self.camera.source,
                 gimbal=self.gimbal.source,
                 ai=self.ai_engine.source,
+            ),
+            encoder=EncoderTelemetry(
+                connected=self.streaming_encoder.status.connected if self.streaming_encoder else False,
+                status=self.streaming_encoder.status.status if self.streaming_encoder else "unknown",
+                bitrate_bps=self.streaming_encoder.status.bitrate_bps if self.streaming_encoder else None,
+                cache_pct=self.streaming_encoder.status.cache_pct if self.streaming_encoder else None,
             ),
         )
         self.link.send_telemetry(telemetry)
@@ -1135,7 +1228,7 @@ class MainWindow(QMainWindow):
         self.preview.set_link_state(False, False)
 
     def _on_latency(self, latency_ms: float) -> None:
-        self.top_bar.latency_chip.set_state("ok" if latency_ms < 150 else "warn", f"LAT {latency_ms:.0f} ms")
+        self.latency_chip.set_state("ok" if latency_ms < 150 else "warn", f"LAT {latency_ms:.0f} ms")
 
     def _on_command_received(self, msg_type: str, payload: dict) -> None:
         logger.info("Command from control room: %s %s", msg_type, payload)
@@ -1242,6 +1335,29 @@ class MainWindow(QMainWindow):
         camera_cfg["ip"] = ip
         camera_cfg["rest_port"] = port  # this field IS the REST port now
         self._save_config()
+
+    def _on_encoder_apply(self, enabled: bool, ip: str, port: int) -> None:
+        encoder_cfg = self._config.setdefault("encoder", {})
+        encoder_cfg["enabled"] = enabled
+        encoder_cfg["ip"] = ip
+        encoder_cfg["port"] = port
+        self._save_config()
+        if not enabled:
+            self.streaming_encoder = None
+            self._sync_encoder_chip()
+            logger.info("Streaming Encoder monitoring disabled")
+            return
+        if self.streaming_encoder is not None:
+            # Live retarget, same reasoning as _on_camera_address_apply --
+            # next refresh tick probes the new address, no restart needed.
+            self.streaming_encoder.ip = ip
+            self.streaming_encoder.port = port
+            self.streaming_encoder._connected = False
+            self.streaming_encoder._last_connect_attempt = 0.0
+            logger.info("Streaming Encoder address changed to %s:%d -- reconnecting on next refresh", ip, port)
+        else:
+            self.streaming_encoder = StreamingEncoderMonitor(ip=ip, port=port)
+            logger.info("Streaming Encoder monitoring enabled at %s:%d", ip, port)
 
     def _on_gps_apply(self, device: str, baudrate: int | str) -> None:
         worker = self._gps_reconfigure_worker
@@ -1361,13 +1477,13 @@ class MainWindow(QMainWindow):
         preview_unit = payload.get("preview_unit")
         if live_unit == self.unit_id:
             self.preview.set_switcher_state("live")
-            self.top_bar.switcher_chip.set_state("bad", "LIVE")
+            self.switcher_chip.set_state("bad", "LIVE")
         elif preview_unit == self.unit_id:
             self.preview.set_switcher_state("preview")
-            self.top_bar.switcher_chip.set_state("ok", "PREVIEW")
+            self.switcher_chip.set_state("ok", "PREVIEW")
         else:
             self.preview.set_switcher_state(None)
-            self.top_bar.switcher_chip.set_state("idle", "STANDBY")
+            self.switcher_chip.set_state("idle", "STANDBY")
 
     def _save_config(self) -> None:
         if self._config_path is None:

@@ -21,7 +21,7 @@ def _app() -> QApplication:
 
 
 def test_status_chip_skips_repaint_for_identical_state():
-    app = _app()
+    _app()
     chip = StatusChip("FPS")
 
     renders = 0

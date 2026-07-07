@@ -309,6 +309,8 @@ class BleTransport:
         return "BLE"
 
     def is_connected(self) -> bool:
+        """Used by DjiRs4ProBackend.check_connection() to detect a BLE
+        drop between control ticks, independent of DUML telemetry age."""
         return bool(self._client is not None and getattr(self._client, "is_connected", False))
 
     async def open(self) -> None:
@@ -455,6 +457,8 @@ class BleTransport:
         return bytes(out)
 
     def notification_age_s(self) -> float | None:
+        """Seconds since the last DUML notify frame arrived, or None
+        before the first one. Feeds check_connection()'s staleness check."""
         if self._last_notify_at is None:
             return None
         return time.monotonic() - self._last_notify_at
@@ -625,6 +629,25 @@ class BleTransport:
 
 
 class DjiRs4ProBackend(GimbalBackend):
+    """GimbalBackend implementation for the DJI RS 4 Pro, talking either R
+    SDK (0xAA, over CanTransport/UartTransport on the RSA port) or DUML
+    (0x55, over BleTransport) depending on `transport.protocol`.
+
+    Beyond simple send/receive, this class also self-regulates BLE
+    joystick traffic so a slow or flaky link degrades gracefully instead
+    of freezing the whole control loop (see docs/RS4_BLE_FINDINGS.md):
+    - `set_velocity` bounds each write with `velocity_send_timeout_s` and
+      abandons (doesn't queue) a stalled one -- see `_should_send_velocity_now`.
+    - `_adaptive_velocity_interval` backs off the send rate when writes
+      are running slow, instead of hammering an already-struggling link.
+    - `check_connection` treats a stale DUML notify stream as a warning,
+      not an automatic disconnect -- BLE writes can still succeed even if
+      telemetry momentarily stops.
+    `velocity_stats()` exposes the rolling write/gap/timeout numbers so
+    GimbalTelemetry (core/protocol.py) can surface BLE health in the UI
+    and to the control room, not just connected/disconnected.
+    """
+
     def __init__(
         self,
         transport,
@@ -873,6 +896,10 @@ class DjiRs4ProBackend(GimbalBackend):
         return stats
 
     def _should_send_velocity_now(self, now: float, pan_deg_s: float, tilt_deg_s: float) -> bool:
+        """Rate-gate: reject calls that arrive before `_next_velocity_send_at`
+        (set by `_adaptive_velocity_interval` after the previous write) so a
+        struggling BLE link gets fewer, more likely to land, writes instead
+        of every 50ms tick piling on."""
         # Always try to send an explicit stop; throttling a stop command is
         # worse than dropping an intermediate move command.
         if abs(pan_deg_s) < 1e-6 and abs(tilt_deg_s) < 1e-6:
@@ -884,6 +911,12 @@ class DjiRs4ProBackend(GimbalBackend):
         return True
 
     def _adaptive_velocity_interval(self, elapsed_ms: float) -> float:
+        """How long to wait before the next send is allowed, based on how
+        long the write we just finished took. Slow writes mean the link is
+        struggling, so back off the send rate (BLE_SLOW/DEGRADED_SEND_INTERVAL_S)
+        instead of queuing more traffic behind an already-congested
+        connection; a healthy fast link gets the full BLE_FAST_SEND_INTERVAL_S
+        (~20Hz) rate."""
         if self._ble_is_degraded() or elapsed_ms >= 140.0:
             return BLE_DEGRADED_SEND_INTERVAL_S
         if elapsed_ms >= 80.0:
@@ -891,6 +924,9 @@ class DjiRs4ProBackend(GimbalBackend):
         return BLE_FAST_SEND_INTERVAL_S
 
     def _ble_transport_stats(self) -> dict[str, int | bool | None]:
+        """MTU/degraded-state snapshot merged into velocity_stats() -- lets
+        the UI/control room distinguish "BLE is slow because the MTU never
+        negotiated up" from other causes of poor write_ms."""
         if self._protocol != "duml":
             return {"ble_mtu_payload_bytes": None, "ble_degraded": False}
         mtu_payload = getattr(self.transport, "mtu_payload_bytes", None)
@@ -951,6 +987,12 @@ class DjiRs4ProBackend(GimbalBackend):
         return self._last_orientation
 
     async def check_connection(self) -> bool:
+        """Periodic health check (called from the UI's async refresh tick,
+        not the 20Hz control loop). Distinguishes two failure modes: the
+        BLE client itself dropping (`transport.is_connected()` false --
+        triggers an actual disconnect + reconnect) versus DUML telemetry
+        merely going stale (logged as a warning only, since joystick
+        writes can keep working even if notify has hiccuped)."""
         if not self._connected:
             return False
         checker = getattr(self.transport, "is_connected", None)

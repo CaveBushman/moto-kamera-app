@@ -3,10 +3,16 @@
 The public DJI R SDK frames used by the RSA UART/CAN port start with
 0xAA. The RS 4 Pro BLE profile observed on real hardware emits a
 different vendor stream whose frames start with 0x55 and carry their
-total length in byte 1. This module deliberately does not claim to
-decode commands yet; it only frames and labels captures so we can build
-evidence without mixing packet-boundary guesses into scripts.
-"""
+total length in byte 1 -- this is the DUML protocol, now fully decoded
+and CRC-validated in gimbal/dji_duml.py (DjiDumlAssembler), which is
+what the live app actually uses.
+
+This lighter module stays deliberately dumber: it splits frames on
+length alone, with no CRC check and no command decoding, so it still
+captures and labels *unknown* traffic during future reverse-engineering
+(e.g. scripts/rs4_ble_capture.py) without assuming the frame is
+well-formed DUML -- useful precisely when investigating something
+DjiDumlAssembler would otherwise silently reject."""
 from __future__ import annotations
 
 from dataclasses import dataclass

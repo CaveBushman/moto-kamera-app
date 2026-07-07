@@ -38,6 +38,11 @@ class DetectedGpsDevice:
 
 
 class GpsManager:
+    """Owns the serial GPS connection (or falls back to a simulated fix).
+    `device`/`baudrate` of "auto" trigger autodetection via
+    _detect_device/_detect_baudrate against AUTO_PATTERNS/NMEA_BAUDRATES.
+    poll() is the UI-facing entry point -- non-blocking either way."""
+
     def __init__(self, device: str | None = None, baudrate: int | str = 9600):
         self.device = device
         self.baudrate = baudrate

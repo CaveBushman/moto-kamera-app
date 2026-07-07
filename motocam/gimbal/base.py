@@ -32,6 +32,11 @@ class GimbalBackend(ABC):
 
 
 class GimbalController:
+    """Backend-agnostic front the rest of the app talks to (ui/main_window.py,
+    tracking/tracker.py). Owns operating-mode/failsafe logic and speed
+    clamping; delegates the actual send to whichever GimbalBackend is
+    configured (gimbal/dji_rs4pro.py for the RS 4 Pro)."""
+
     def __init__(self, backend: GimbalBackend, max_pan_speed: float = 20.0, max_tilt_speed: float = 12.0):
         self.backend = backend
         self.max_pan_speed = max_pan_speed

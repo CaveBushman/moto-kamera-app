@@ -85,6 +85,9 @@ def crc32(data: bytes, init: int = CRC32_INIT) -> int:
 
 @dataclass(frozen=True)
 class RSdkFrame:
+    """One decoded/pre-encode R SDK command or reply (see the wire layout
+    at the top of this module)."""
+
     cmd_type: int
     sequence: int
     cmd_set: int
@@ -93,6 +96,7 @@ class RSdkFrame:
 
 
 def build_frame(frame: RSdkFrame, version: int = 0) -> bytes:
+    """Encode an RSdkFrame to wire bytes with both CRCs filled in."""
     data = bytes([frame.cmd_set, frame.cmd_id]) + frame.payload
     total_length = FRAME_OVERHEAD + len(data)
     if total_length > 0x3FF:
@@ -118,6 +122,8 @@ class FrameError(ValueError):
 
 
 def parse_frame(raw: bytes) -> RSdkFrame:
+    """Decode wire bytes to an RSdkFrame, raising FrameError if either
+    CRC or the length field doesn't check out."""
     if len(raw) < FRAME_OVERHEAD + 2:
         raise FrameError(f"frame too short: {len(raw)} bytes")
     if raw[0] != SOF:
@@ -176,6 +182,7 @@ def build_position_control(
 
 
 def build_get_position(sequence: int) -> bytes:
+    """Request the gimbal's current orientation (paired with parse_position_reply)."""
     return build_frame(RSdkFrame(CMD_TYPE_CTRL, sequence, CMD_SET_GIMBAL, CMD_GET_POSITION, b"\x01"))
 
 

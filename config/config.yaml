@@ -64,6 +64,11 @@ camera:
 gps:
   device: auto
   baudrate: 9600
+encoder:
+  enabled: false   # broadcast uplink from the bike -- Blackmagic Streaming
+                    # Encoder HD/4K, separate device from the gimbal camera
+  ip: 192.168.9.40
+  port: 80
 telemetry:
   control_room_url: ws://127.0.0.1:8765
 preview_relay:

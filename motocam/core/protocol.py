@@ -59,6 +59,9 @@ class TargetState(str, Enum):
 
 @dataclass
 class GpsTelemetry:
+    """Populated by gps/gps_manager.py from parsed NMEA sentences (or a
+    simulated fix when no receiver is configured)."""
+
     lat: float | None = None
     lon: float | None = None
     speed_kmh: float | None = None
@@ -70,6 +73,9 @@ class GpsTelemetry:
 
 @dataclass
 class AiTelemetry:
+    """Populated by tracking/tracker.py (TrackingEngine) each health tick --
+    inference stats plus the current lock state (see TargetState)."""
+
     enabled: bool = False
     state: str = TargetState.IDLE.value
     target_id: int | None = None
@@ -83,6 +89,12 @@ class AiTelemetry:
 
 @dataclass
 class GimbalTelemetry:
+    """Populated by gimbal/base.py (GimbalController) from the active
+    backend (gimbal/dji_rs4pro.py for the RS 4 Pro). The velocity_* fields
+    mirror DjiRs4ProBackend's BLE write-timing diagnostics (see
+    _log_velocity_timing_stats) so the control room can see BLE health,
+    not just connected/disconnected."""
+
     connected: bool = False
     mode: str = OperatingMode.MANUAL.value
     pan_deg: float = 0.0
@@ -121,6 +133,22 @@ class CameraTelemetry:
 class NetworkTelemetry:
     latency_ms: float | None = None
     link_up: bool = True
+
+
+@dataclass
+class EncoderTelemetry:
+    """Populated by encoder/streaming_encoder.py's StreamingEncoderMonitor
+    polling the Blackmagic Streaming Encoder's own REST API -- the
+    broadcast uplink from the bike, a separate device from the gimbal
+    camera and unrelated to this app's own preview relay. `status`
+    mirrors the encoder's own vocabulary (Idle/Connecting/Streaming/
+    Flushing/Interrupted) rather than being remapped here, so the control
+    room shows exactly what the encoder itself reports."""
+
+    connected: bool = False
+    status: str = "unknown"
+    bitrate_bps: int | None = None
+    cache_pct: int | None = None
 
 
 @dataclass
@@ -173,6 +201,7 @@ class Telemetry:
     network: NetworkTelemetry = field(default_factory=NetworkTelemetry)
     system: SystemTelemetry = field(default_factory=SystemTelemetry)
     sources: SourceTelemetry = field(default_factory=SourceTelemetry)
+    encoder: EncoderTelemetry = field(default_factory=EncoderTelemetry)
 
 
 @dataclass
@@ -220,4 +249,5 @@ def parse_telemetry(payload: dict[str, Any]) -> Telemetry:
         network=NetworkTelemetry(**payload.get("network", {})),
         system=SystemTelemetry(**payload.get("system", {})),
         sources=SourceTelemetry(**payload.get("sources", {})),
+        encoder=EncoderTelemetry(**payload.get("encoder", {})),
     )

@@ -9,6 +9,9 @@ from motocam.ui.widgets.camera_panel import BUTTON_ROW_HEIGHT, METRIC_AREA_HEIGH
 
 
 class GimbalPanel(QGroupBox):
+    """Cockpit panel showing GimbalController orientation as MetricTiles,
+    plus the recenter/lock buttons wired up by ui/main_window.py."""
+
     home_requested = pyqtSignal()
     lock_toggled = pyqtSignal(bool)
 

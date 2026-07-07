@@ -83,6 +83,10 @@ def _scale_detections(detections: list, scale_to_source: float, frame_shape: tup
 
 
 class AiWorker(QThread):
+    """Background inference loop (see module docstring); owns frame
+    submission, drop/backpressure bookkeeping, and adaptive rate limiting
+    so a slow detector self-throttles instead of saturating the CPU."""
+
     detections_ready = pyqtSignal(object)  # list[Detection]
 
     def __init__(

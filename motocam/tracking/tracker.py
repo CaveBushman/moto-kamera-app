@@ -1,12 +1,18 @@
 """Tracking Engine (design doc 8.2-8.4, 10.5).
 
-Owns the active target: operator taps a rider in the live preview, the
-engine starts an OpenCV correlation tracker (CSRT) on that bounding box
-and reports its center every frame so the PID loop can compute pan/tilt
-error. A real deployment feeds YOLO detections from ai/ai_engine.py into
-re-acquire the tracker after a short loss (ByteTrack/Kalman per section
-8.3) -- this MVP tracker instead relies on CSRT's own short-term
-robustness and falls back to "lost" if confidence drops.
+Owns the active target and reports its center every frame so the PID
+loop (tracking/pid.py) can compute pan/tilt error. Two tracking modes,
+selected automatically per target:
+
+- Detection-driven (ByteTracker, tracking/byte_tracker.py): when the AI
+  worker is producing YOLO detections, each one is fed to a ByteTracker
+  that assigns stable per-rider ids and coasts a track through brief
+  occlusion via its Kalman filter. Operator tap / FULL-AI auto-acquire
+  locks a track id, and the published target then comes from that track.
+- CSRT fallback: when there's no detection under the tap (AI NULL, or
+  the tap misses every rider), an OpenCV CSRT correlation tracker is
+  seeded on the tapped box instead. Appearance-only, so it degrades
+  faster under occlusion than the ByteTrack path, but works with zero AI.
 """
 from __future__ import annotations
 

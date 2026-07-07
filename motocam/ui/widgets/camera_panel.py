@@ -11,6 +11,9 @@ BUTTON_ROW_HEIGHT = 58
 
 
 class CameraPanel(QGroupBox):
+    """Cockpit panel showing CameraController.state as MetricTiles, plus
+    the record/autofocus buttons wired up by ui/main_window.py."""
+
     record_toggled = pyqtSignal(bool)
     autofocus_requested = pyqtSignal()
 

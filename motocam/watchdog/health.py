@@ -28,6 +28,9 @@ RPI_THERMAL_PATH = Path("/sys/class/thermal/thermal_zone0/temp")
 
 
 class HealthMonitor:
+    """Rate-limited system stats sampler. Use `latest()` from the UI thread
+    (never blocks); `sample()` is the blocking variant for tests/scripts."""
+
     def __init__(self, sample_interval_s: float = DEFAULT_SAMPLE_INTERVAL_S):
         self._video_fps = 0.0
         self._sample_interval_s = max(0.0, float(sample_interval_s))

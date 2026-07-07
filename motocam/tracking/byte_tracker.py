@@ -140,6 +140,10 @@ class _KalmanBoxTracker:
 
 
 class _InternalTrack:
+    """Bookkeeping wrapper around one _KalmanBoxTracker: hit/age counters
+    plus `confirmed` (promoted once min_hits is reached, see ByteTracker.update).
+    `as_track()` renders the public, immutable Track snapshot."""
+
     def __init__(self, track_id: int, box: Box, score: float):
         self.track_id = track_id
         self.kf = _KalmanBoxTracker(box)
@@ -170,6 +174,11 @@ class _InternalTrack:
 
 
 class ByteTracker:
+    """Multi-object tracker producing stable per-rider ids across frames
+    (see module docstring for the ByteTrack two-stage association this
+    implements). Owned by tracking/tracker.py's TrackingEngine; called
+    only from the UI thread, so it needs no internal locking."""
+
     def __init__(
         self,
         high_thresh: float = 0.5,

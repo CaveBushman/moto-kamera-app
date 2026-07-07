@@ -18,6 +18,11 @@ BYTES_PER_FRAME = 2  # int16 mono
 
 
 class TalkbackPlayer(QObject):
+    """Plays director talkback PCM chunks arriving over the WebSocket link
+    (see LinkClient) through a small jitter buffer: `feed()` (any thread)
+    appends to `_buffer`, the PortAudio callback `_on_output` (its own
+    thread) drains it, zero-padding on underrun instead of glitching."""
+
     def __init__(self, output_device: int | str | None = None):
         super().__init__()
         self.output_device = output_device

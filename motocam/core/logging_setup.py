@@ -11,6 +11,9 @@ from typing import Any
 
 
 class JsonlFormatter(logging.Formatter):
+    """Renders one log record as one JSON line (design doc section 18) --
+    easy to `grep`/`jq` on the Pi without a log-parsing library."""
+
     def format(self, record: logging.LogRecord) -> str:
         payload = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(record.created)),
@@ -24,6 +27,8 @@ class JsonlFormatter(logging.Formatter):
 
 
 def setup_logging(log_dir: str | Path = "logs", level: int = logging.INFO) -> logging.Logger:
+    """Wire the root "motocam" logger (every module logs under this name)
+    to a rotating JSONL file plus the console. Call once at app startup."""
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -45,6 +50,11 @@ def setup_logging(log_dir: str | Path = "logs", level: int = logging.INFO) -> lo
 
 
 class ControlRoomLogHandler(logging.Handler):
+    """Mirrors local log records to the control room over the telemetry
+    link, so an operator watching the control room UI sees camera-unit
+    errors live without SSHing into the Pi. `link` starts out None (no
+    connection yet) and gets set later via `install_control_room_log_forwarder`."""
+
     def __init__(self, link: Any, level: int = logging.NOTSET):
         super().__init__(level)
         self.link = link
@@ -68,6 +78,11 @@ class ControlRoomLogHandler(logging.Handler):
 
 
 class StartupLogBuffer(logging.Handler):
+    """Holds log records emitted before the control room link exists (app
+    boot, or while reconnecting) so `replay_to()` can flush them once the
+    link comes up -- otherwise early errors would be silently lost from
+    the control room's view even though they're still in the local file."""
+
     def __init__(self, level: int = logging.NOTSET):
         super().__init__(level)
         self.records: list[tuple[str, str, str]] = []
@@ -88,6 +103,9 @@ class StartupLogBuffer(logging.Handler):
 
 
 def install_control_room_log_forwarder(logger: logging.Logger, link: Any) -> ControlRoomLogHandler:
+    """Idempotent: attach a ControlRoomLogHandler if none exists yet, or
+    just repoint the existing one's `link` (e.g. after a reconnect gave
+    us a new link object) rather than stacking duplicate handlers."""
     for handler in logger.handlers:
         if isinstance(handler, ControlRoomLogHandler):
             handler.link = link

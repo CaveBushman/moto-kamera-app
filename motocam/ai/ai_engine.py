@@ -1,16 +1,14 @@
 """AI Engine (design doc 8, 10.4).
 
-Interface point for the Hailo/AI HAT+ YOLO inference pipeline described
-in the design doc (section 8.5: YOLOv8n/YOLOv11n on Hailo, classes
-cyclist/motorcycle/car/person). Real Hailo inference requires the
-`hailo-platform` runtime and a compiled `.hef` model, neither of which
-is available off the Raspberry Pi, so this ships a `NullDetector` that
-produces no detections and a `Detector` protocol so a `HailoDetector`
-can be dropped in later without touching tracking/ui code.
-
-Until that lands, target acquisition works purely through tap-to-select
-+ OpenCV CSRT (tracking/tracker.py), which is exactly the documented
-fallback path in section 8.2 ("pokud v miste kliknuti neni detekce...").
+Defines the `Detector` protocol and the plain-data `Detection` shape
+every detector implementation (ai/hailo_detector.py: HailoDetector,
+DotDetector, HailoCanaryDetector, NullDetector) produces, so
+tracking/ui code never needs to know which one is active -- only
+AiEngine.source (delegated to the detector's own `source`) reveals that,
+for telemetry/UI display. `build_detector()` in hailo_detector.py picks
+the concrete detector from config, falling back to `NullDetector` (no
+detections at all) on any missing runtime/model/HAT+, so tap-to-select +
+CSRT (tracking/tracker.py) still works with zero AI hardware present.
 """
 from __future__ import annotations
 
@@ -59,6 +57,10 @@ class NullDetector:
 
 
 class AiEngine:
+    """Thin wrapper the UI/tracker call into: gates inference behind
+    `enabled` (AI ASSIST/FULL AI modes only) and filters the active
+    detector's raw output down to `confidence`-passing boxes."""
+
     def __init__(self, detector: Detector | None = None, target_class: str = "cyclist", confidence: float = 0.35):
         self.detector = detector or NullDetector()
         self.target_class = target_class

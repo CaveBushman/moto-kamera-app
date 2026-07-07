@@ -22,7 +22,7 @@ def _app() -> QApplication:
 
 
 def test_settings_dialog_emits_gps_device_and_baudrate():
-    app = _app()
+    _app()
     dialog = SettingsDialog()
     emitted: list[tuple[str, object]] = []
     dialog.gps_apply_requested.connect(lambda device, baudrate: emitted.append((device, baudrate)))
@@ -34,7 +34,7 @@ def test_settings_dialog_emits_gps_device_and_baudrate():
 
 
 def test_settings_dialog_supports_auto_gps_baudrate():
-    app = _app()
+    _app()
     dialog = SettingsDialog()
     emitted: list[tuple[str, object]] = []
     dialog.gps_apply_requested.connect(lambda device, baudrate: emitted.append((device, baudrate)))
@@ -46,7 +46,7 @@ def test_settings_dialog_supports_auto_gps_baudrate():
 
 
 def test_settings_dialog_emits_ble_joystick_timeout():
-    app = _app()
+    _app()
     dialog = SettingsDialog()
     emitted: list[dict] = []
     dialog.gimbal_apply_requested.connect(emitted.append)
@@ -59,7 +59,7 @@ def test_settings_dialog_emits_ble_joystick_timeout():
 
 
 def test_settings_dialog_emits_ai_performance_budget():
-    app = _app()
+    _app()
     dialog = SettingsDialog()
     emitted: list[float] = []
     dialog.ai_performance_budget_changed.connect(emitted.append)

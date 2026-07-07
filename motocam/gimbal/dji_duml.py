@@ -53,6 +53,7 @@ OVERHEAD = 13           # header(4) + sender/recv(2) + seq(2) + cmd(3) + crc16(2
 
 
 def _crc8_table() -> list[int]:
+    """Lookup table for duml_crc8 (poly 0x8C, reflected)."""
     table = []
     for i in range(256):
         c = i
@@ -63,6 +64,7 @@ def _crc8_table() -> list[int]:
 
 
 def _crc16_table() -> list[int]:
+    """Lookup table for duml_crc16 (poly 0x8408, reflected)."""
     table = []
     for i in range(256):
         c = i
@@ -94,6 +96,10 @@ def duml_crc16(data: bytes, init: int = 0x3692) -> int:
 
 @dataclass(frozen=True)
 class DjiDumlFrame:
+    """One parsed/validated DUML frame (see the wire layout at the top of
+    this module). `parse` is the only way to get a validated instance from
+    raw bytes; both CRCs must pass or it raises."""
+
     sender: int
     receiver: int
     seq: int
@@ -224,8 +230,9 @@ def joystick_channel_value(ratio: float) -> int:
 
 def build_joystick_frame(seq: int, ch_a: float, ch_c: float, ch_b: float = 0.0) -> bytes:
     """RS 4 Pro BLE gimbal joystick control frame. ch_a/ch_b/ch_c are
-    ratios in [-1, 1]; axis assignment (which channel is pan/tilt/roll)
-    is not yet confirmed against real hardware -- see
+    ratios in [-1, 1]. Axis assignment live-confirmed against real
+    hardware: ch_a=tilt (+up/-down), ch_c=pan (+right/-left), ch_b unused
+    (roll) -- see DjiRs4ProBackend.set_velocity and
     docs/RS4_BLE_FINDINGS.md."""
     payload = struct.pack(
         "<HHH",
@@ -261,8 +268,8 @@ RECENTER_PAYLOAD = bytes.fromhex("fe01")
 def build_recenter_frame(seq: int) -> bytes:
     """RS 4 Pro BLE recenter/HOME command. Reproduces the captured frame's
     header and payload exactly (see docs/RS4_BLE_FINDINGS.md); only the
-    sequence number and CRCs vary per call. Not yet confirmed live against
-    real hardware -- see the log warning in DjiRs4ProBackend.go_home()."""
+    sequence number and CRCs vary per call. Live-confirmed against real
+    hardware -- gimbal visibly recentered when deliberately misaligned."""
     return build_duml_frame(
         sender=RECENTER_SENDER, receiver=RECENTER_RECEIVER, seq=seq,
         cmd_type=0x40, cmd_set=CMD_SET_GIMBAL, cmd_id=CMD_ID_RECENTER,

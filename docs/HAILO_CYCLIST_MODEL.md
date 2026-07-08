@@ -50,11 +50,39 @@ ai:
   target_class: cyclist
 ```
 
+## Jak nasbírat vlastní trénovací data
+
+MotoCam umí za jízdy sbírat trénovací příklady přímo z toho, co operátor
+sám potvrdí -- ne syrové detekce stock modelu (ten stejně zná jen
+`bicycle`/`person`, ne `cyclist`), ale box, na který jsi klepnul
+(tap-to-select) nebo který FULL AI automaticky zamklo a appka ho dál
+sleduje. Tohle je ground truth od člověka, ne hádanka modelu.
+
+1. V Settings -> AI TRACKING zapni "Collect AI training data while
+   tracking" (nebo `ai.training_capture.enabled: true` v `config.yaml`).
+2. Jeď, sleduj cyklisty (AI ASSIST s klepnutím, nebo FULL AI). Appka
+   ukládá snímek + anotaci vždy, když je tracker ve stavu LOCKED (aktivně
+   potvrzený, ne dobíhající přes výpadek), max jednou za
+   `ai.training_capture.interval_s` (výchozí 2 s), aby data nezaplnila
+   kartu skoro identickými snímky.
+3. Výsledek je ve formátu Ultralytics YOLO v `data/training_capture/`
+   (`<timestamp>.jpg` + `<timestamp>.txt` + `classes.txt`) -- připravené
+   rovnou k tréninku, žádná ruční konverze.
+4. Přenes `data/training_capture/` na stroj s GPU pro trénink (viz níže).
+
 ## Jak získat vlastní model
 
-1. Trénink/konverze v ONNX.
-2. Kompilace do Hailo HEF pomocí Hailo Dataflow Compiler / Hailo Model Zoo.
-3. Výstup uložit jako `.hef`.
+1. Trénink/doladění (fine-tuning) YOLOv8/v11 na nasbíraných datech --
+   na stroji s GPU, ne na Pi (na CPU by to trvalo dny až týdny).
+2. Export do ONNX.
+3. Kompilace do Hailo HEF pomocí Hailo Dataflow Compiler / Hailo Model Zoo
+   -- taky mimo Pi, DFC běží na x86_64.
+4. Výstup uložit jako `.hef` a nainstalovat přes
+   `bash scripts/prepare_cyclist_hef.sh /path/to/your_model.hef`.
+
+AI HAT+ (Hailo-8) sám o sobě neumí trénovat -- je to čistě inferenční
+akcelerátor (rychlý dopředný průchod hotovou sítí), ne trénovací
+hardware. Trénink vždy probíhá mimo Pi.
 
 ## Poznámka
 

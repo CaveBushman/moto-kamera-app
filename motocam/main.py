@@ -312,9 +312,11 @@ def main() -> int:
     app.setStyleSheet(DARK_STYLESHEET)
     # Virtual haptics: press-flash on every button (see ui/haptics.py).
     # Config-gated so it can be disabled if it ever misbehaves on the Pi.
-    haptics = None
+    # Stored on the app object because Qt does not own event filters --
+    # without a live Python reference the filter would be garbage-collected
+    # mid-session and the feedback would silently stop.
     if bool(display_cfg.get("haptics", True)):
-        haptics = install_haptics(app)  # noqa: F841 -- must outlive app.exec (Qt doesn't own filters)
+        app.motocam_haptics = install_haptics(app)
         logger.info("Virtual haptic feedback enabled")
     logger.info("Qt application created")
     _write_startup_state(config_path, "qt_app_created")

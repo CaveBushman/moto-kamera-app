@@ -31,6 +31,8 @@ from PyQt6.QtWidgets import (
 )
 
 from motocam.audio.devices import list_audio_devices
+from motocam.ui.effects import apply_glass_shadow
+from motocam.ui.widgets.responsive_grid import ResponsiveGroupGrid
 from motocam.video.devices import list_video_devices
 
 logger = logging.getLogger("motocam.ui.settings")
@@ -43,8 +45,15 @@ IRIS_VALUES = ["f/1.4", "f/2.0", "f/2.8", "f/4.0", "f/5.6", "f/8.0", "f/11"]
 # YOLOv8/v11 HEF has no "cyclist" class -- it detects "bicycle"/"person".
 # The class name must match the loaded model's labels exactly or FULL-AI
 # auto-acquire silently never fires, so the operator can type any label.
-TARGET_CLASSES = ["cyclist", "bicycle", "person", "motorcycle", "car"]
+TARGET_CLASSES = ["cyclist", "peloton", "bicycle", "person", "motorcycle", "car"]
 UNIT_IDS = [f"moto-{i}" for i in range(1, 5)]
+# Sentinel spinbox minimums for the finish-line coordinate fields, one notch
+# outside the real -90..90 / -180..180 range so they can never collide with
+# an actual coordinate -- paired with setSpecialValueText("not set") so an
+# unset finish line reads as "not set" in the UI instead of a plain 0.0/0.0
+# that looks identical to a deliberately entered "Null Island" coordinate.
+FINISH_UNSET_LAT = -91.0
+FINISH_UNSET_LON = -181.0
 GIMBAL_CONNECTIONS = [
     ("Mock / desk test", "mock"),
     ("DJI RS4 Pro BLE", "ble"),
@@ -126,6 +135,9 @@ class SettingsDialog(QDialog):
     gimbal_apply_requested = pyqtSignal(object)  # gimbal config dict
     ble_scan_requested = pyqtSignal(str)  # preferred BLE name filter
     safety_apply_requested = pyqtSignal(bool, float)  # (ride_lock_enabled, ride_lock_speed_kmh)
+    finish_apply_requested = pyqtSignal(float, float)  # (finish_lat, finish_lon)
+    finish_use_current_requested = pyqtSignal()
+    finish_clear_requested = pyqtSignal()
     exit_requested = pyqtSignal()  # quit the whole app (kiosk has no window chrome)
 
     def __init__(self, parent=None):
@@ -168,19 +180,33 @@ class SettingsDialog(QDialog):
         QScroller.grabGesture(self.scroll_area.viewport(), QScroller.ScrollerGestureType.TouchGesture)
         content = QWidget()
         content.setObjectName("settingsContent")
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
-        layout.addWidget(self._build_connection_group())
-        layout.addWidget(self._build_gps_group())
-        layout.addWidget(self._build_video_group())
-        layout.addWidget(self._build_audio_group())
-        layout.addWidget(self._build_gimbal_group())
-        layout.addWidget(self._build_camera_group())
-        layout.addWidget(self._build_encoder_group())
-        layout.addWidget(self._build_tracking_group())
-        layout.addWidget(self._build_safety_group())
-        layout.addStretch(1)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        # Cards reflow into 1/2/3 columns by available width (see
+        # widgets/responsive_grid.py) instead of one form column stretched
+        # edge to edge on a wide desktop dev window or squeezed on the Pi's
+        # narrow touchscreen. Each card also gets the same glass-card drop
+        # shadow already used for the HUD panels/diagnostics dialog
+        # (ui/effects.py) -- this dialog was the one place still using flat,
+        # shadowless QGroupBoxes.
+        self.groups_grid = ResponsiveGroupGrid()
+        for group in (
+            self._build_connection_group(),
+            self._build_gps_group(),
+            self._build_video_group(),
+            self._build_audio_group(),
+            self._build_gimbal_group(),
+            self._build_camera_group(),
+            self._build_encoder_group(),
+            self._build_tracking_group(),
+            self._build_safety_group(),
+            self._build_finish_zone_group(),
+        ):
+            apply_glass_shadow(group, blur_radius=28, y_offset=8, alpha=130)
+            self.groups_grid.add_card(group)
+        content_layout.addWidget(self.groups_grid)
+        content_layout.addStretch(1)
         self.scroll_area.setWidget(content)
         outer_layout.addWidget(self.scroll_area, stretch=1)
 
@@ -308,7 +334,7 @@ class SettingsDialog(QDialog):
         return form
 
     def _build_connection_group(self) -> QGroupBox:
-        group = QGroupBox("CONNECTION")
+        group = QGroupBox("🔗 CONNECTION")
         form = self._new_form_layout(group)
 
         self.unit_id_combo = QComboBox()
@@ -364,7 +390,7 @@ class SettingsDialog(QDialog):
 
     # -- GPS -----------------------------------------------------------------
     def _build_gps_group(self) -> QGroupBox:
-        group = QGroupBox("GPS / GNSS")
+        group = QGroupBox("🛰 GPS / GNSS")
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -408,7 +434,7 @@ class SettingsDialog(QDialog):
 
     # -- video source ----------------------------------------------------------
     def _build_video_group(self) -> QGroupBox:
-        group = QGroupBox("VIDEO SOURCE")
+        group = QGroupBox("🎥 VIDEO SOURCE")
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -470,7 +496,7 @@ class SettingsDialog(QDialog):
 
     # -- audio ---------------------------------------------------------------
     def _build_audio_group(self) -> QGroupBox:
-        group = QGroupBox("AUDIO")
+        group = QGroupBox("🔊 AUDIO")
         form = self._new_form_layout(group)
 
         self.input_device_combo = QComboBox()
@@ -497,7 +523,7 @@ class SettingsDialog(QDialog):
 
     # -- gimbal --------------------------------------------------------------
     def _build_gimbal_group(self) -> QGroupBox:
-        group = QGroupBox("GIMBAL CONTROL")
+        group = QGroupBox("🎮 GIMBAL CONTROL")
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -690,7 +716,7 @@ class SettingsDialog(QDialog):
 
     # -- camera & lens --------------------------------------------------------
     def _build_camera_group(self) -> QGroupBox:
-        group = QGroupBox("CAMERA && LENS")  # "&&" escapes to a literal "&" (Qt mnemonic syntax)
+        group = QGroupBox("📷 CAMERA && LENS")  # "&&" escapes to a literal "&" (Qt mnemonic syntax)
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -763,7 +789,7 @@ class SettingsDialog(QDialog):
 
     # -- streaming encoder ------------------------------------------------------
     def _build_encoder_group(self) -> QGroupBox:
-        group = QGroupBox("STREAMING ENCODER")
+        group = QGroupBox("📡 STREAMING ENCODER")
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -809,7 +835,7 @@ class SettingsDialog(QDialog):
 
     # -- AI tracking ------------------------------------------------------------
     def _build_tracking_group(self) -> QGroupBox:
-        group = QGroupBox("AI TRACKING")
+        group = QGroupBox("🎯 AI TRACKING")
         outer = QVBoxLayout(group)
 
         # A word-wrapped QLabel added straight to QFormLayout.addRow() can
@@ -937,7 +963,7 @@ class SettingsDialog(QDialog):
 
     # -- ride-safe lockout ------------------------------------------------------
     def _build_safety_group(self) -> QGroupBox:
-        group = QGroupBox("SAFETY")
+        group = QGroupBox("🛡 SAFETY")
         outer = QVBoxLayout(group)
 
         hint = QLabel(
@@ -971,6 +997,64 @@ class SettingsDialog(QDialog):
 
     def _emit_safety_apply(self) -> None:
         self.safety_apply_requested.emit(self.ride_lock_checkbox.isChecked(), self.ride_lock_speed_spin.value())
+
+    # -- finish-zone peel-off rule ----------------------------------------------
+    def _build_finish_zone_group(self) -> QGroupBox:
+        group = QGroupBox("🏁 FINISH ZONE")
+        outer = QVBoxLayout(group)
+
+        hint = QLabel(
+            "Race-rule peel-off distance from the finish line. Set the finish "
+            "coordinates once (director push, or USE CURRENT POSITION while "
+            "stood on the line) -- the preview then warns on approach and "
+            "flags the mandatory peel-off distance automatically."
+        )
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
+
+        form = self._new_form_layout()
+        outer.addLayout(form)
+
+        self.finish_lat_spin = QDoubleSpinBox()
+        self.finish_lat_spin.setRange(FINISH_UNSET_LAT, 90.0)
+        self.finish_lat_spin.setDecimals(6)
+        self.finish_lat_spin.setSpecialValueText("not set")
+        form.addRow("Finish latitude", self.finish_lat_spin)
+
+        self.finish_lon_spin = QDoubleSpinBox()
+        self.finish_lon_spin.setRange(FINISH_UNSET_LON, 180.0)
+        self.finish_lon_spin.setDecimals(6)
+        self.finish_lon_spin.setSpecialValueText("not set")
+        form.addRow("Finish longitude", self.finish_lon_spin)
+
+        button_row = QHBoxLayout()
+        apply_btn = QPushButton("APPLY FINISH")
+        apply_btn.clicked.connect(self._emit_finish_apply)
+        button_row.addWidget(apply_btn)
+
+        use_current_btn = QPushButton("USE CURRENT POSITION")
+        use_current_btn.clicked.connect(self.finish_use_current_requested.emit)
+        button_row.addWidget(use_current_btn)
+
+        clear_btn = QPushButton("CLEAR")
+        clear_btn.clicked.connect(self.finish_clear_requested.emit)
+        button_row.addWidget(clear_btn)
+        form.addRow(button_row)
+
+        return group
+
+    def set_finish_values(self, lat: float | None, lon: float | None) -> None:
+        self.finish_lat_spin.setValue(lat if lat is not None else FINISH_UNSET_LAT)
+        self.finish_lon_spin.setValue(lon if lon is not None else FINISH_UNSET_LON)
+
+    def _emit_finish_apply(self) -> None:
+        # Guard against a stray APPLY FINISH click while the fields still
+        # show "not set" -- without this, clicking Apply before entering (or
+        # loading) real coordinates would silently arm a bogus finish line at
+        # the sentinel value instead of doing nothing.
+        if self.finish_lat_spin.value() == FINISH_UNSET_LAT or self.finish_lon_spin.value() == FINISH_UNSET_LON:
+            return
+        self.finish_apply_requested.emit(self.finish_lat_spin.value(), self.finish_lon_spin.value())
 
     @staticmethod
     def _select(combo: QComboBox, text: str | None) -> None:

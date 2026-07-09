@@ -95,6 +95,14 @@ display:
 safety:
   ride_lock_enabled: false
   ride_lock_speed_kmh: 15
+  # Finish-zone peel-off rule: 500 m mandatory per the federation's regs,
+  # with a 1 km heads-up so the pilot has time to react. finish_lat/lon are
+  # set from Settings (USE CURRENT POSITION or manual entry) or pushed by
+  # the control room via stage_info -- null until set for the day's race.
+  finish_warning_m: 1000
+  finish_mandatory_m: 500
+  finish_lat: null
+  finish_lon: null
 logging:
   dir: logs
 _config_dir: /Users/david/Development/07 moto kamera app/config

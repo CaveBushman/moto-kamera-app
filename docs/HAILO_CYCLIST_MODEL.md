@@ -70,6 +70,29 @@ sleduje. Tohle je ground truth od člověka, ne hádanka modelu.
    rovnou k tréninku, žádná ruční konverze.
 4. Přenes `data/training_capture/` na stroj s GPU pro trénink (viz níže).
 
+### Peloton jako druhá třída
+
+Na startu závodu je cíl skoro vždy peloton (skupina), ne jeden jezdec --
+appka to zvládne stejným mechanismem, jen s jinou třídou:
+
+1. V Settings -> AI TRACKING přepni "Target class" na `peloton` ještě
+   před tap-to-select na startu (combo box je editovatelný, `peloton` je
+   už v seznamu). Klepnutím označíš box kolem celé skupiny.
+2. Dokud je tracker LOCKED, capture ukládá snímky s třídou podle
+   aktuálně vybraného Target class -- tedy `peloton`, ne `cyclist`.
+   `classes.txt` roste o nový řádek při prvním výskytu nové třídy a
+   pořadí (index 0, 1, ...) se nikdy nepřepisuje, i když si řádky ručně
+   doplníš.
+3. Po rozjetí závodu (rozpad pelotonu, únik) přepni Target class zpět na
+   `cyclist` a pokračuj ve sběru dat pro jednotlivce.
+4. Výsledný `data/training_capture/` tak obsahuje obě třídy pohromadě --
+   trénink pak žene jeden YOLO model, co pozná `cyclist` i `peloton`
+   zvlášť.
+
+Fotky nahrané ručně (ne appkou) do stejné složky musí použít stejné
+indexy tříd jako `classes.txt` už obsahuje -- zkontroluj ho, než je
+doanotuješ.
+
 ## Jak získat vlastní model
 
 1. Trénink/doladění (fine-tuning) YOLOv8/v11 na nasbíraných datech --

@@ -242,6 +242,18 @@ class PreviewView(QFrame):
         self.talkback_label.hide()
         self.talkback_label.raise_()
 
+        # Finish-zone peel-off rule (race regs: the moto must leave the
+        # rider it's filming inside a fixed distance of the finish line --
+        # see gps/finish_zone.py). Two severities share one label: amber
+        # "warning" (heads-up, still filming) and red "mandatory" (inside
+        # the hard peel-off distance, or the director pushed PEEL_OFF
+        # directly) -- same red as talkback_label since both mean "act
+        # now", just styled a size up since this one is safety-critical.
+        self.finish_zone_label = QLabel("", self)
+        self.finish_zone_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.finish_zone_label.hide()
+        self.finish_zone_label.raise_()
+
         self.switcher_label = QLabel("", self)
         self.switcher_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.switcher_label.hide()
@@ -408,6 +420,29 @@ class PreviewView(QFrame):
         # Talkback visibility feeds into _hud_top_margin() too (see
         # set_switcher_state) -- a plain _position_overlays() would leave
         # the HUD's vertical offset stale.
+        self._reposition_layout()
+
+    def set_finish_zone_state(self, level: str, text: str) -> None:
+        """level is "none" (hidden), "warning" (amber heads-up) or
+        "mandatory" (red, hard peel-off distance or a director PEEL_OFF)."""
+        if level == "warning":
+            self.finish_zone_label.setStyleSheet(
+                "background-color: rgba(146, 64, 14, 232); color: white; "
+                "border: 1px solid rgba(255, 200, 120, 175); border-radius: 8px; "
+                "padding: 10px 18px; font-size: 17px; font-weight: 950;"
+            )
+        elif level == "mandatory":
+            self.finish_zone_label.setStyleSheet(
+                "background-color: rgba(94, 21, 26, 236); color: white; "
+                "border: 2px solid rgba(255, 120, 120, 205); border-radius: 8px; "
+                "padding: 10px 18px; font-size: 19px; font-weight: 950;"
+            )
+        self.finish_zone_label.setText(text)
+        self.finish_zone_label.adjustSize()
+        visible = level != "none"
+        self.finish_zone_label.setVisible(visible)
+        if visible:
+            self.finish_zone_label.raise_()
         self._reposition_layout()
 
     def set_link_state(self, connected: bool, preview_streaming: bool) -> None:
@@ -584,6 +619,8 @@ class PreviewView(QFrame):
             bottom = max(bottom, self.switcher_label.y() + self.switcher_label.height())
         if not self.talkback_label.isHidden():
             bottom = max(bottom, self.talkback_label.y() + self.talkback_label.height())
+        if not self.finish_zone_label.isHidden():
+            bottom = max(bottom, self.finish_zone_label.y() + self.finish_zone_label.height())
         if not self.ride_lock_label.isHidden():
             bottom = max(bottom, self.ride_lock_label.y() + self.ride_lock_label.height())
         if not self.cancel_track_button.isHidden():
@@ -613,6 +650,7 @@ class PreviewView(QFrame):
 
     def _position_overlays(self) -> None:
         self.talkback_label.adjustSize()
+        self.finish_zone_label.adjustSize()
         self.switcher_label.adjustSize()
         self.link_status_label.adjustSize()
         self.ride_lock_label.adjustSize()
@@ -628,12 +666,14 @@ class PreviewView(QFrame):
             max(PTT_MARGIN, self.height() - self.link_status_label.height() - PTT_MARGIN),
         )
         # Top-center stack: whichever of these are visible stack top to
-        # bottom, centered, in priority order -- most safety-critical
-        # (ride lock) first, then the tracking-cancel pill, then the
-        # talkback banner. All three are rare/transient states that could
-        # in principle coincide, so this can't just pick one fixed slot.
+        # bottom, centered, in priority order -- the finish-zone peel-off
+        # rule first (it's a race-regulation obligation, not just a UI
+        # guard), then ride lock, then the tracking-cancel pill, then the
+        # talkback banner. All of these are rare/transient states that
+        # could in principle coincide, so this can't just pick one fixed
+        # slot.
         y = PTT_MARGIN
-        for widget in (self.ride_lock_label, self.cancel_track_button, self.talkback_label):
+        for widget in (self.finish_zone_label, self.ride_lock_label, self.cancel_track_button, self.talkback_label):
             if widget.isHidden():
                 continue
             x = max(PTT_MARGIN, (self.width() - widget.width()) // 2)

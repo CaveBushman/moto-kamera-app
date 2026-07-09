@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ from motocam.core.telemetry_sources import is_fallback_source, source_value_disp
 from motocam.encoder.streaming_encoder import STATUS_CHIP_STATE, StreamingEncoderMonitor
 from motocam.gimbal.base import GimbalController
 from motocam.gimbal.factory import build_gimbal_backend
+from motocam.gps.finish_zone import FinishZoneMonitor, FinishZoneState, is_escalation
 from motocam.gps.gps_manager import GpsManager
 from motocam.network.link_client import LinkClient
 from motocam.tracking.pid import GimbalPid
@@ -138,6 +140,32 @@ class MainWindow(QMainWindow):
         startup_cfg = self._config.get("startup") or {}
         self._ride_lock_enabled = bool(safety_cfg.get("ride_lock_enabled", False))
         self._ride_lock_speed_kmh = float(safety_cfg.get("ride_lock_speed_kmh", 15.0))
+        # Finish-zone peel-off rule (500 m mandatory per the federation's
+        # regs, 1 km heads-up so the pilot has time to react -- see
+        # gps/finish_zone.py). finish_lat/lon persist across restarts as a
+        # convenience default, same as the other safety settings, but are
+        # course-specific -- Settings has a CLEAR button for a new race.
+        # `or default` (not just dict.get's own default) so an explicit
+        # `finish_warning_m: null` in config.yaml also falls back cleanly --
+        # but that means an explicit 0 would be swallowed too, so guard on
+        # `is not None` instead of truthiness (0 m is a nonsensical radius
+        # anyway, but silently ignoring an explicit config value is a footgun
+        # worth avoiding regardless).
+        finish_warning_raw = safety_cfg.get("finish_warning_m")
+        finish_mandatory_raw = safety_cfg.get("finish_mandatory_m")
+        self._finish_zone = FinishZoneMonitor(
+            warning_m=float(finish_warning_raw) if finish_warning_raw is not None else 1000.0,
+            mandatory_m=float(finish_mandatory_raw) if finish_mandatory_raw is not None else 500.0,
+            finish_lat=safety_cfg.get("finish_lat"),
+            finish_lon=safety_cfg.get("finish_lon"),
+        )
+        self._finish_zone_gps_state = FinishZoneState.NONE
+        # Last GPS-computed distance, kept even across a fix dropout so the
+        # banner text doesn't lose its distance figure -- see
+        # _update_finish_zone/_render_finish_zone_banner.
+        self._finish_zone_last_distance_m: float | None = None
+        self._peel_off_manual_active = False
+        self._peel_off_reason: str | None = None
         self._hardware_connect_delay_s = max(0.0, float(startup_cfg.get("hardware_connect_delay_s", 0.0) or 0.0))
         self._hardware_connect_enabled = False
         self._hardware_start_timer: QTimer | None = None
@@ -387,6 +415,7 @@ class MainWindow(QMainWindow):
         )
         self._settings.set_training_capture_enabled(self.training_capture is not None)
         self._settings.set_safety_values(self._ride_lock_enabled, self._ride_lock_speed_kmh)
+        self._settings.set_finish_values(self._finish_zone.finish_lat, self._finish_zone.finish_lon)
         self._settings.exec()
 
     # -- Signal wiring -----------------------------------------------------
@@ -446,6 +475,9 @@ class MainWindow(QMainWindow):
         self._settings.gimbal_apply_requested.connect(self._on_gimbal_apply)
         self._settings.ble_scan_requested.connect(self._on_ble_scan_requested)
         self._settings.safety_apply_requested.connect(self._on_safety_apply)
+        self._settings.finish_apply_requested.connect(self._apply_finish_zone)
+        self._settings.finish_use_current_requested.connect(self._on_finish_use_current)
+        self._settings.finish_clear_requested.connect(self._on_finish_clear)
         self._settings.exit_requested.connect(self._on_exit_requested)
 
     def _schedule_unique_task(self, attr_name: str, label: str, coro_factory) -> None:
@@ -728,7 +760,11 @@ class MainWindow(QMainWindow):
             # LOCKED only (not WEAK/coasting): the box is a fresh
             # confirmation this frame, not a Kalman-predicted guess during
             # occlusion -- see training_capture.py's module docstring.
-            self.training_capture.maybe_capture(frame, self.tracker.bbox)
+            # Label follows the operator's live Target class (Settings),
+            # so e.g. switching to "peloton" before tapping the group at
+            # a race start captures those examples under "peloton"
+            # instead of the default "cyclist".
+            self.training_capture.maybe_capture(frame, self.tracker.bbox, label=self.ai_engine.target_class)
         self.preview.update_frame(frame)
         preview_submit_ms = (time.monotonic() - checkpoint) * 1000.0
         checkpoint = time.monotonic()
@@ -1041,6 +1077,55 @@ class MainWindow(QMainWindow):
             and fix.speed_kmh >= self._ride_lock_speed_kmh
         )
         self.preview.set_ride_locked(locked)
+        self._update_finish_zone(fix.lat if fix.fix else None, fix.lon if fix.fix else None)
+
+    def _update_finish_zone(self, lat: float | None, lon: float | None) -> None:
+        if lat is None or lon is None:
+            # No GPS fix this tick -- hold the last known finish-zone state
+            # rather than downgrading straight to NONE. A MANDATORY/WARNING
+            # banner is exactly the kind of thing that must not flicker off
+            # from a momentary fix dropout, and GPS multipath near finish-
+            # line grandstands/structures is common right where this rule
+            # matters most. The banner only clears when the GPS state itself
+            # genuinely resolves to FAR/NONE, or the finish line is cleared.
+            return
+        state, distance_m = self._finish_zone.evaluate(lat, lon)
+        if is_escalation(self._finish_zone_gps_state, state):
+            logger.warning(
+                "Finish zone: %s at %.0f m (mandatory peel-off inside %.0f m)",
+                state.value, distance_m or 0.0, self._finish_zone.mandatory_m,
+            )
+            QApplication.beep()
+        self._finish_zone_gps_state = state
+        self._finish_zone_last_distance_m = distance_m
+        self._render_finish_zone_banner()
+
+    def _render_finish_zone_banner(self) -> None:
+        """Combine the GPS-computed state with a manual director PEEL_OFF --
+        whichever is more urgent wins, and a manual override always shows
+        its own reason text so the pilot knows *why* even without a GPS fix
+        on the finish line. Always reads live state off `self` (no
+        distance/level argument) so every caller -- a fresh GPS tick, a
+        PEEL_OFF message, or a Settings CLEAR -- renders through the exact
+        same priority logic instead of each one deciding what to show."""
+        if self._peel_off_manual_active:
+            reason = f" — {self._peel_off_reason}" if self._peel_off_reason else ""
+            self.preview.set_finish_zone_state("mandatory", f"DIRECTOR: LEAVE TARGET NOW{reason}")
+            return
+        state = self._finish_zone_gps_state
+        if state == FinishZoneState.MANDATORY:
+            text = f"LEAVE TARGET NOW — INSIDE {self._finish_zone.mandatory_m:.0f} m FINISH ZONE"
+            self.preview.set_finish_zone_state("mandatory", text)
+        elif state == FinishZoneState.WARNING:
+            distance_m = self._finish_zone_last_distance_m
+            text = (
+                f"APPROACHING FINISH — {distance_m:.0f} m TO PEEL-OFF LINE"
+                if distance_m is not None
+                else "APPROACHING FINISH"
+            )
+            self.preview.set_finish_zone_state("warning", text)
+        else:
+            self.preview.set_finish_zone_state("none", "")
 
     def _async_refresh_tick(self) -> None:
         if self._hardware_connect_enabled:
@@ -1280,6 +1365,18 @@ class MainWindow(QMainWindow):
             self.stage_banner.set_stage(
                 payload.get("stage_number", 0), payload.get("stage_name", ""), payload.get("laps", 0)
             )
+            self._maybe_apply_finish_zone_from_payload(payload)
+        elif msg_type == MessageType.PEEL_OFF.value:
+            self._peel_off_manual_active = bool(payload.get("active", True))
+            self._peel_off_reason = payload.get("reason") or None
+            logger.warning(
+                "Director PEEL_OFF %s%s",
+                "active" if self._peel_off_manual_active else "cleared",
+                f" ({self._peel_off_reason})" if self._peel_off_reason else "",
+            )
+            if self._peel_off_manual_active:
+                QApplication.beep()
+            self._render_finish_zone_banner()
         elif msg_type == MessageType.SWITCHER_STATE.value:
             self._on_switcher_state(payload)
         elif msg_type == MessageType.PTT_START.value:
@@ -1513,6 +1610,66 @@ class MainWindow(QMainWindow):
         safety_cfg["ride_lock_speed_kmh"] = speed_kmh
         self._save_config()
         logger.info("Ride-safe lockout %s (threshold %.0f km/h)", "enabled" if enabled else "disabled", speed_kmh)
+
+    def _maybe_apply_finish_zone_from_payload(self, payload: dict) -> None:
+        """Validate finish_lat/finish_lon from a network STAGE_INFO payload
+        before it ever reaches FinishZoneMonitor/haversine_distance_m.
+        json.loads accepts the non-standard `Infinity`/`-Infinity`/`NaN`
+        tokens by default, and this payload comes over the control-room
+        link -- an unvalidated non-finite or out-of-range value would sail
+        through float() with no error, get persisted, and then raise a
+        math-domain ValueError out of the next periodic GPS tick
+        (_update_finish_zone), permanently freezing the finish-zone banner
+        (the tick has no try/except of its own -- see class docstring on
+        the per-frame path for why that pattern matters). Same
+        reject-and-log convention as the SET_MODE handler above."""
+        raw_lat, raw_lon = payload.get("finish_lat"), payload.get("finish_lon")
+        if raw_lat is None or raw_lon is None:
+            return
+        try:
+            lat, lon = float(raw_lat), float(raw_lon)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring STAGE_INFO with non-numeric finish coordinates: %r, %r", raw_lat, raw_lon)
+            return
+        if not (math.isfinite(lat) and math.isfinite(lon) and -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            logger.warning("Ignoring STAGE_INFO with out-of-range finish coordinates: %s, %s", lat, lon)
+            return
+        self._apply_finish_zone(lat, lon)
+
+    def _apply_finish_zone(self, lat: float, lon: float) -> None:
+        self._finish_zone.set_finish(lat, lon)
+        self._finish_zone_gps_state = FinishZoneState.NONE
+        self._finish_zone_last_distance_m = None
+        safety_cfg = self._config.setdefault("safety", {})
+        safety_cfg["finish_lat"] = lat
+        safety_cfg["finish_lon"] = lon
+        self._save_config()
+        self._settings.set_finish_values(lat, lon)
+        logger.info("Finish line set to %.6f, %.6f", lat, lon)
+
+    def _on_finish_use_current(self) -> None:
+        fix = self.gps.poll()
+        if not fix.fix or fix.lat is None or fix.lon is None:
+            logger.warning("Cannot set finish to current position: no GPS fix")
+            return
+        self._apply_finish_zone(fix.lat, fix.lon)
+
+    def _on_finish_clear(self) -> None:
+        self._finish_zone.clear_finish()
+        self._finish_zone_gps_state = FinishZoneState.NONE
+        self._finish_zone_last_distance_m = None
+        # Route through _render_finish_zone_banner instead of setting
+        # "none" on the preview directly -- clearing the GPS finish line
+        # must not blank an active manual director PEEL_OFF banner, which
+        # is an independent, higher-priority state (see
+        # _render_finish_zone_banner's priority check).
+        self._render_finish_zone_banner()
+        safety_cfg = self._config.setdefault("safety", {})
+        safety_cfg["finish_lat"] = None
+        safety_cfg["finish_lon"] = None
+        self._save_config()
+        self._settings.set_finish_values(None, None)
+        logger.info("Finish line cleared")
 
     def _on_switcher_state(self, payload: dict) -> None:
         live_unit = payload.get("live_unit")

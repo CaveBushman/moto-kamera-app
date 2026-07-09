@@ -5,12 +5,22 @@ the interim COCO model happens to call a box -- see
 docs/HAILO_CYCLIST_MODEL.md), this captures the *operator's own
 confirmation*: whenever the tracker is LOCKED -- the rider tapped a
 target (tap-to-select) or FULL AI auto-acquired one and it's still being
-followed -- that box is a human-confirmed "this is the cyclist" example,
-independent of whatever class name the current interim model used to
-find it. Saved in Ultralytics YOLO format (one image + one same-named
-.txt label file per capture, normalized [x_center, y_center, w, h]) so
-it drops straight into a YOLO fine-tuning run; the compiled result then
-installs via scripts/prepare_cyclist_hef.sh.
+followed -- that box is a human-confirmed example, independent of
+whatever class name the current interim model used to find it. Saved in
+Ultralytics YOLO format (one image + one same-named .txt label file per
+capture, normalized [x_center, y_center, w, h]) so it drops straight
+into a YOLO fine-tuning run; the compiled result then installs via
+scripts/prepare_cyclist_hef.sh.
+
+Multiple classes (e.g. a single "cyclist" vs. a whole "peloton" at a
+race start) share one output directory: `maybe_capture`'s `label`
+argument picks the class for that capture, and `classes.txt` grows a new
+line the first time a label is seen -- its line number is the class
+index written into that capture's .txt, and existing lines (including
+any the operator hand-edited) are never reordered or clobbered. The
+caller (main_window) passes the operator's currently selected AI target
+class, so switching "Target class" in Settings before tapping a target
+is what decides which class a capture lands under.
 
 Capturing every locked frame would flood the SD card with near-duplicate
 frames (a ride is mostly small motion between consecutive frames) --
@@ -56,11 +66,19 @@ class TrainingDataCapture:
         self.captured_count = 0
         self._low_disk_logged = False
 
-    def maybe_capture(self, frame: np.ndarray, bbox: tuple[int, int, int, int] | None) -> bool:
+    def maybe_capture(
+        self,
+        frame: np.ndarray,
+        bbox: tuple[int, int, int, int] | None,
+        label: str | None = None,
+    ) -> bool:
         """Save `frame` + `bbox` as one training example if the rate
-        limit and disk-space floor both allow it right now. Returns
-        whether a capture actually happened (tests / callers that want
-        to know)."""
+        limit and disk-space floor both allow it right now. `label`
+        overrides the class for this capture (falls back to the
+        instance default, e.g. "cyclist") -- pass the operator's live
+        Target class so a peloton-mode capture lands under "peloton"
+        instead. Returns whether a capture actually happened (tests /
+        callers that want to know)."""
         if bbox is None:
             return False
         now = time.monotonic()
@@ -69,7 +87,7 @@ class TrainingDataCapture:
         if not self._has_free_disk_space():
             return False
         self._last_capture_at = now
-        self._write_example(frame, bbox)
+        self._write_example(frame, bbox, label or self.label)
         self.captured_count += 1
         if self.captured_count % 20 == 0:
             logger.info("Training capture: %d examples saved to %s", self.captured_count, self.output_dir)
@@ -91,27 +109,51 @@ class TrainingDataCapture:
         self._low_disk_logged = False
         return True
 
-    def _write_example(self, frame: np.ndarray, bbox: tuple[int, int, int, int]) -> None:
+    def _write_example(self, frame: np.ndarray, bbox: tuple[int, int, int, int], label: str) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime()) + f"_{int((time.time() % 1) * 1000):03d}"
         image_path = self.output_dir / f"{stamp}.jpg"
         label_path = self.output_dir / f"{stamp}.txt"
+        # _class_index() does its own disk I/O (reads/writes classes.txt) and
+        # must stay inside this try -- otherwise a transient disk error there
+        # (SD card full/read-only) would raise straight out of maybe_capture
+        # uncaught, aborting the caller's whole video frame instead of just
+        # being logged and skipped like every other capture-write failure.
         try:
+            class_index = self._class_index(label)
             cv2.imwrite(str(image_path), frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-            label_path.write_text(self._yolo_line(frame.shape, bbox) + "\n", encoding="utf-8")
-            self._ensure_classes_file()
+            label_path.write_text(self._yolo_line(frame.shape, bbox, class_index) + "\n", encoding="utf-8")
         except OSError as exc:
             logger.warning("Training capture write failed: %s", exc)
 
     @staticmethod
-    def _yolo_line(frame_shape: tuple[int, ...], bbox: tuple[int, int, int, int]) -> str:
+    def _yolo_line(frame_shape: tuple[int, ...], bbox: tuple[int, int, int, int], class_index: int) -> str:
         height, width = frame_shape[:2]
         x, y, w, h = bbox
         cx = (x + w / 2.0) / width
         cy = (y + h / 2.0) / height
-        return f"0 {cx:.6f} {cy:.6f} {w / width:.6f} {h / height:.6f}"
+        return f"{class_index} {cx:.6f} {cy:.6f} {w / width:.6f} {h / height:.6f}"
 
-    def _ensure_classes_file(self) -> None:
+    def _class_index(self, label: str) -> int:
+        """Line number of `label` in classes.txt, appending it as a new
+        class the first time it's seen. Existing lines (including any
+        the operator hand-edited in) keep their index and are never
+        reordered, so an in-progress dataset stays consistent.
+
+        Matches case-insensitively -- `label` comes from the operator's
+        free-text-editable Target class field (see settings_dialog.py),
+        so "peloton" typed once and "Peloton" typed another time must
+        land in the same class, the same way ai_engine's own detection
+        matching (main_window._pick_target_detection) already treats
+        class names case-insensitively. The stored spelling is whichever
+        casing was written first."""
         classes_path = self.output_dir / "classes.txt"
-        if not classes_path.exists():
-            classes_path.write_text(self.label + "\n", encoding="utf-8")
+        labels: list[str] = []
+        if classes_path.exists():
+            labels = [line.strip() for line in classes_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        lowered = [existing.lower() for existing in labels]
+        if label.lower() in lowered:
+            return lowered.index(label.lower())
+        labels.append(label)
+        classes_path.write_text("\n".join(labels) + "\n", encoding="utf-8")
+        return len(labels) - 1

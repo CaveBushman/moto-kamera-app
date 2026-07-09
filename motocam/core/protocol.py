@@ -36,6 +36,7 @@ class MessageType(str, Enum):
     REQUEST_PREVIEW = "request_preview"
     STAGE_INFO = "stage_info"
     SWITCHER_STATE = "switcher_state"
+    PEEL_OFF = "peel_off"
     PING = "ping"
     ERROR = "error"
 
@@ -178,10 +179,19 @@ class StageInfo:
     The route GPX itself stays local to the control room (director
     reference / future route-progress display) -- pushing trackpoint data
     over this link isn't worth the bandwidth for what's currently just a
-    banner heading, so only the lap count crosses the wire."""
+    banner heading, so only the lap count crosses the wire.
+
+    finish_lat/finish_lon are the one exception: the finish-line fix that
+    drives the moto's own finish-zone peel-off warning (gps/finish_zone.py)
+    has to reach the unit somehow, and re-using STAGE_INFO (set once per
+    stage by the director, same lifecycle as the finish line itself) is
+    simpler than a whole new message type. None until the director sets it
+    -- the moto side also accepts a manual Settings entry as a fallback."""
     stage_number: int = 0
     stage_name: str = ""
     laps: int = 0
+    finish_lat: float | None = None
+    finish_lon: float | None = None
 
 
 @dataclass
@@ -232,7 +242,8 @@ def make_envelope(msg_type: MessageType, payload: dict[str, Any] | Any, unit_id:
 
 
 def parse_stage_info(payload: dict[str, Any]) -> StageInfo:
-    return StageInfo(**{k: v for k, v in payload.items() if k in ("stage_number", "stage_name", "laps")})
+    allowed = ("stage_number", "stage_name", "laps", "finish_lat", "finish_lon")
+    return StageInfo(**{k: v for k, v in payload.items() if k in allowed})
 
 
 def parse_switcher_state(payload: dict[str, Any]) -> SwitcherState:

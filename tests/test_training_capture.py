@@ -82,3 +82,31 @@ def test_classes_file_written_once_not_per_capture(tmp_path):
 
     # must not have been clobbered back to just "cyclist\n" by the second capture
     assert "extra-note" in (tmp_path / "classes.txt").read_text()
+
+
+def test_per_call_label_overrides_default_and_gets_its_own_class_index(tmp_path):
+    # Race-start workflow: operator switches Target class to "peloton"
+    # before tapping the group, "cyclist" stays the capture default.
+    capture = TrainingDataCapture(output_dir=tmp_path, interval_s=0.0, label="cyclist")
+
+    capture.maybe_capture(_frame(), (0, 0, 10, 10))  # default -> cyclist, index 0
+    time.sleep(0.12)  # interval_s has a 0.1s safety floor even when 0.0 is passed
+    capture.maybe_capture(_frame(), (0, 0, 10, 10), label="peloton")  # index 1
+
+    assert (tmp_path / "classes.txt").read_text().splitlines() == ["cyclist", "peloton"]
+    label_files = sorted(p for p in tmp_path.glob("*.txt") if p.name != "classes.txt")
+    assert len(label_files) == 2
+    assert label_files[0].read_text().split()[0] == "0"
+    assert label_files[1].read_text().split()[0] == "1"
+
+
+def test_repeated_label_reuses_same_class_index(tmp_path):
+    capture = TrainingDataCapture(output_dir=tmp_path, interval_s=0.0, label="peloton")
+
+    capture.maybe_capture(_frame(), (0, 0, 10, 10))
+    time.sleep(0.12)  # interval_s has a 0.1s safety floor even when 0.0 is passed
+    capture.maybe_capture(_frame(), (0, 0, 10, 10))
+
+    label_files = [p for p in tmp_path.glob("*.txt") if p.name != "classes.txt"]
+    assert {f.read_text().split()[0] for f in label_files} == {"0"}
+    assert (tmp_path / "classes.txt").read_text().strip() == "peloton"

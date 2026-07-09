@@ -162,6 +162,35 @@ QGroupBox::title {{
     font-size: 13px;
 }}
 
+/* Settings/Diagnostics cards specifically (scoped to QDialog so this never
+   touches the live HUD's #cameraPanel/#gimbalPanel, which stay on the base
+   QGroupBox rule above for max glanceable-in-sunlight contrast): a softer,
+   rounder "21st century" card -- bigger radius, a two-tone gradient instead
+   of a flat fill, and a pill-shaped title chip with an accent-tinted border
+   instead of the plain grey label. Depth comes from ui/effects.py's
+   apply_glass_shadow, applied per-card in settings_dialog.py -- Qt
+   stylesheets have no box-shadow, so that part can't live here. */
+QDialog QGroupBox {{
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+        stop:0 rgba(22, 26, 34, 235), stop:1 rgba(13, 15, 20, 235));
+    border: 1px solid rgba(255, 255, 255, 40);
+    border-top: 2px solid rgba(0, 194, 255, 150);
+    border-radius: 14px;
+    margin-top: 18px;
+    padding: 16px 14px 14px 14px;
+}}
+
+QDialog QGroupBox::title {{
+    left: 16px;
+    padding: 4px 14px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(0, 119, 255, 60), stop:1 rgba(0, 194, 255, 40));
+    border: 1px solid rgba(0, 194, 255, 90);
+    border-radius: 10px;
+    color: #dff3ff;
+    font-size: 13px;
+}}
+
 QFrame#previewFrame {{
     background-color: black;
     border: 1px solid rgba(255, 255, 255, 56);
@@ -275,16 +304,17 @@ QWidget#modeBar QPushButton:checked {{
    editable input widgets, which was leaving IP/port entry effectively
    invisible (dark-on-dark) in Settings -- style them explicitly. */
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
-    background-color: rgba(20, 22, 28, 230);
+    background-color: rgba(24, 27, 34, 235);
     color: #eef1f6;
     border: 1px solid rgba(255, 255, 255, 35);
-    border-radius: 8px;
-    padding: 6px 10px;
+    border-radius: 10px;
+    padding: 7px 11px;
     selection-background-color: {ACCENT};
 }}
 
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border: 1px solid {ACCENT_2};
+    background-color: rgba(24, 30, 40, 240);
 }}
 
 QComboBox QAbstractItemView {{

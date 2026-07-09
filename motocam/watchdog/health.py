@@ -71,6 +71,7 @@ class HealthMonitor:
         telemetry timer.
         """
         now = time.monotonic()
+        new_future: Future | None = None
         with self._lock:
             if self._last_sample is None:
                 self._last_sample = SystemTelemetry(video_fps=self._video_fps)
@@ -79,8 +80,18 @@ class HealthMonitor:
             due = now - self._last_sample_at >= self._sample_interval_s
             running = self._sample_future is not None and not self._sample_future.done()
             if due and not running:
-                self._sample_future = self._executor.submit(self._collect_sample)
-                self._sample_future.add_done_callback(self._on_sample_done)
+                new_future = self._executor.submit(self._collect_sample)
+                self._sample_future = new_future
+        # add_done_callback must run outside the lock: if _collect_sample
+        # already finished on the executor thread by the time we get here,
+        # the callback (_on_sample_done, which also takes self._lock) fires
+        # synchronously on THIS thread right inside add_done_callback --
+        # re-entering a plain (non-reentrant) Lock and deadlocking the Qt UI
+        # thread against itself. This raced rarely enough in testing to look
+        # like an intermittent multi-second-to-forever freeze right at
+        # startup (first telemetry tick), which is exactly what it was.
+        if new_future is not None:
+            new_future.add_done_callback(self._on_sample_done)
         return cached
 
     def close(self) -> None:

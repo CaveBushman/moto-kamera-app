@@ -58,6 +58,16 @@ CAN_RECV_ID = 0x222  # verified against the reference implementation
 CAN_BITRATE = 1_000_000
 RECONNECT_MIN_INTERVAL_S = 5.0
 REPLY_TIMEOUT_S = 0.8
+# CAN/UART (R SDK) have no cheap client-level "still connected" signal the
+# way BLE's transport.is_connected() gives one (see check_connection) -- a
+# GET_POSITION reply is the only proof of life. One dropped frame on a
+# CAN bus is common and not itself a fault, so _query_position tolerates
+# this many consecutive failures (send error or no reply) before declaring
+# the link dead -- long enough to ride out transient loss, short enough
+# (~2.4s at REPLY_TIMEOUT_S=0.8) to actually detect a real fault (bus
+# error, unplugged UART adapter, powered-off gimbal) within a few
+# watchdog ticks instead of never.
+MAX_POSITION_QUERY_FAILURES = 3
 BLE_NOTIFY_STALE_S = 10.0
 BLE_DEGRADED_MTU_PAYLOAD_BYTES = 20
 BLE_FAST_SEND_INTERVAL_S = 0.05
@@ -291,6 +301,7 @@ class BleTransport:
         tx_char_uuid: str | None = None,
         rx_char_uuid: str | None = None,
         scan_timeout_s: float = 8.0,
+        initial_connect_timeout_s: float = 4.0,
         mtu_payload_bytes: int = 20,
     ) -> None:
         self.address = address.strip() if address else None
@@ -299,6 +310,19 @@ class BleTransport:
         self.tx_char_uuid = self._normalize_uuid(tx_char_uuid)
         self.rx_char_uuid = self._normalize_uuid(rx_char_uuid)
         self.scan_timeout_s = scan_timeout_s
+        # _connect_client_with_retry's attempt 0 is a *guess* (the address
+        # from config or a previous session) -- on a fresh app/Pi restart
+        # the adapter usually hasn't seen this peripheral yet this boot, so
+        # that guess fails far more often than not. Giving it the full
+        # scan_timeout_s before falling back to a real scan was exactly
+        # what made every restart take ~30s to reconnect (attempt 0 burns
+        # scan_timeout_s failing, then the scan burns scan_timeout_s again,
+        # then attempt 1's connect burns it a third time). A short timeout
+        # here lets a doomed guess fail fast without shrinking the scan
+        # itself or attempt 1's connect (that one follows a scan that just
+        # found the device actively advertising, so it deserves the full
+        # budget).
+        self.initial_connect_timeout_s = max(1.0, float(initial_connect_timeout_s))
         # Floor, not the final word: open() raises this to the ACTUALLY
         # negotiated ATT MTU once connected (commonly 247 on modern
         # BLE, vs. this conservative un-negotiated default of 20). Without
@@ -375,8 +399,9 @@ class BleTransport:
             for attempt in range(2):
                 target = self.address if attempt == 0 else await self._scan_for_device(locked=True)
                 client = BleakClient(target)
+                connect_timeout = self.initial_connect_timeout_s if attempt == 0 else self.scan_timeout_s
                 try:
-                    await client.connect(timeout=self.scan_timeout_s)
+                    await client.connect(timeout=connect_timeout)
                     if attempt == 1:
                         self.address = target
                     return client
@@ -703,6 +728,9 @@ class DjiRs4ProBackend(GimbalBackend):
         self._connected = False
         self._sequence = 0
         self._assembler = FrameAssembler()
+        # Consecutive _query_position failures (CAN/UART liveness signal --
+        # see MAX_POSITION_QUERY_FAILURES). Reset on any successful reply.
+        self._position_query_failures = 0
         self._last_connect_attempt = 0.0
         self._last_orientation = (0.0, 0.0, 0.0)
         self._connect_lock = asyncio.Lock()
@@ -828,18 +856,51 @@ class DjiRs4ProBackend(GimbalBackend):
             await self._call_transport("send", request)
         except Exception as exc:  # noqa: BLE001
             logger.warning("R SDK send failed: %s", exc)
-            self._connected = False
+            await self._on_position_query_failure()
             return None
         deadline = time.monotonic() + REPLY_TIMEOUT_S
         while time.monotonic() < deadline:
-            chunk = await self._call_transport("receive_chunk", max(0.0, deadline - time.monotonic()))
+            try:
+                chunk = await self._call_transport("receive_chunk", max(0.0, deadline - time.monotonic()))
+            except Exception as exc:  # noqa: BLE001 -- e.g. a UART adapter disappearing mid-read
+                logger.warning("R SDK receive failed: %s", exc)
+                await self._on_position_query_failure()
+                return None
             if not chunk:
                 continue
             for frame in self._assembler.feed(chunk):
                 orientation = parse_position_reply(frame)
                 if orientation is not None:
+                    self._position_query_failures = 0
                     return orientation
+        # No valid reply within the timeout -- on CAN/UART this is the only
+        # liveness signal there is (see MAX_POSITION_QUERY_FAILURES).
+        await self._on_position_query_failure()
         return None
+
+    async def _on_position_query_failure(self) -> None:
+        """A GET_POSITION attempt failed (send error, receive error, or no
+        valid reply before the deadline). Only declares the link dead after
+        MAX_POSITION_QUERY_FAILURES in a row -- a single dropped CAN frame
+        is normal noise, not a fault -- but once the threshold is hit, this
+        is what lets the regular watchdog tick (_gimbal_watchdog_refresh ->
+        refresh_orientation -> _query_position) actually notice a CAN bus
+        fault or an unplugged UART adapter, instead of silently retrying
+        forever while main_window keeps showing "GIMBAL OK". Also closes
+        the transport handle here (matching the BLE health-check path,
+        _close_after_health_failure) so the next connect() doesn't leak a
+        second can.Bus/serial.Serial on top of the dead one."""
+        self._position_query_failures += 1
+        if self._position_query_failures < MAX_POSITION_QUERY_FAILURES:
+            return
+        if self._connected:
+            logger.warning(
+                "R SDK GET_POSITION failed %d times in a row, marking gimbal disconnected",
+                self._position_query_failures,
+            )
+        self._connected = False
+        self._position_query_failures = 0
+        await self._close_after_health_failure()
 
     async def set_velocity(self, pan_deg_s: float, tilt_deg_s: float) -> None:
         if not self._connected:

@@ -102,7 +102,19 @@ class LinkClient(QObject):
                     logger.info("Connected to control room at %s", self.url)
                     await self._send(make_envelope(MessageType.HELLO, {"name": self.unit_id}, self.unit_id))
                     await self._receive_loop(ws)
-            except (ValueError, OSError, ConnectionClosed) as exc:
+            except Exception as exc:  # noqa: BLE001 -- this loop's whole job is "never stay down forever"
+                # Broader than (ValueError, OSError, ConnectionClosed) on
+                # purpose: `command_received.emit(...)` in _receive_loop
+                # runs the connected slot (MainWindow._on_command_received)
+                # synchronously on this same stack (direct Qt connection,
+                # same thread) -- any exception a message handler raises,
+                # a malformed envelope from Envelope.from_json, or a
+                # websockets handshake failure (InvalidHandshake and
+                # friends derive from Exception, not ValueError/OSError)
+                # would otherwise propagate out of this loop and kill the
+                # reconnect task permanently. One bad message or one failed
+                # handshake must cost a reconnect cycle, never the link
+                # for the rest of the session.
                 logger.warning("Control room link unavailable (%s), retrying in %.0fs", exc, RECONNECT_DELAY_S)
             finally:
                 self._ws = None

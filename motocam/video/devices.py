@@ -44,7 +44,15 @@ PROBE_INDEX_COUNT = 6
 # time); a timed-out probe is simply abandoned (leaked, not killed --
 # there's no API to cancel an in-flight VideoCapture open) and treated
 # as "no camera there".
-PROBE_TIMEOUT_S = 0.6
+#
+# macOS gets a much longer budget than the generic case: a *healthy*
+# AVFoundation open routinely takes 1-3s (device warm-up, permission
+# machinery), so 0.6s classified every real laptop camera as "hung" and
+# Settings showed an empty Capture-device list -- nothing to select. The
+# scan runs on DeviceScanWorker's own QThread, so a longer wait costs scan
+# latency only, never UI freeze; the hang scenario the timeout exists for
+# (indefinite grabImageUntilDate) is still bounded, just at 4s.
+PROBE_TIMEOUT_S = 4.0 if platform.system() == "Darwin" else 0.6
 
 # V4L2 QUERYCAP ioctl (linux/videodev2.h). VIDIOC_QUERYCAP = _IOR('V', 0,
 # struct v4l2_capability) where the struct is 104 bytes. We only read the

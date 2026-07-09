@@ -184,10 +184,24 @@ class BlackmagicRestCameraBackend(CameraBackend):
 
     async def _try_get(self, path: str) -> dict | None:
         """GET tolerating a missing endpoint/feature (404 and friends) --
-        per-field degradation, not whole-refresh failure."""
+        per-field degradation, not whole-refresh failure.
+
+        Must catch the same connection-level errors as connect()'s own
+        except clause (URLError/OSError/TimeoutError), not just
+        HTTPError: get_state() calls this for every field after the first
+        (/transports/0/record, checked separately and un-guarded on
+        purpose -- that one IS the "camera is really gone" signal). A
+        transient timeout on, say, /video/iso used to propagate straight
+        out of get_state() uncaught; CameraController.refresh() caught it
+        generically and reset self.state to disconnected, but never
+        touched backend._connected, which stayed stuck True -- so the top
+        bar's camera chip kept showing green "OK" indefinitely while every
+        actual reading (ISO, recording state, media remaining) silently
+        went blank. Now a mid-poll blip degrades this one field to None,
+        same as a 404, instead of lying about the whole camera's health."""
         try:
             return await self._request("GET", path)
-        except urllib.error.HTTPError:
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, TimeoutError):
             return None
 
     @property

@@ -37,6 +37,7 @@ def build_gimbal_backend(gimbal_cfg: dict[str, Any]) -> GimbalBackend:
                     tx_char_uuid=_blank_to_none(gimbal_cfg.get("ble_tx_char_uuid")),
                     rx_char_uuid=_blank_to_none(gimbal_cfg.get("ble_rx_char_uuid")),
                     scan_timeout_s=float(gimbal_cfg.get("ble_scan_timeout_s", 8.0)),
+                    initial_connect_timeout_s=float(gimbal_cfg.get("ble_initial_connect_timeout_s", 4.0)),
                     mtu_payload_bytes=int(gimbal_cfg.get("ble_mtu_payload_bytes", 20)),
                 )
             elif connection == "can":

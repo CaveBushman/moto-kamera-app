@@ -30,6 +30,12 @@ from PyQt6.QtCore import QObject, pyqtSignal
 logger = logging.getLogger("motocam.video")
 
 FPS_EMIT_INTERVAL_S = 0.5
+# How often the loop retries opening the capture device while it has none
+# (never found one, or a reopen after a failed read also came up empty).
+# Retrying every frame interval would hammer the driver and can stall the
+# synthetic-frame cadence noticeably (cv2.VideoCapture(device) is a
+# blocking call); this throttles it to a background heartbeat instead.
+REOPEN_RETRY_INTERVAL_S = 3.0
 
 if sys.platform == "darwin":
     # OpenCV's AVFoundation backend tries to request camera permission by
@@ -70,6 +76,7 @@ class VideoEngine(QObject):
         self._dropped_frames = 0
         self._frame_times: deque[float] = deque()
         self._last_fps_emit_at: float | None = None
+        self._last_reopen_attempt_at = 0.0
         self._t = 0.0
 
     def start(self) -> None:
@@ -88,6 +95,16 @@ class VideoEngine(QObject):
         self._thread = None
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+        if thread is not None and thread.is_alive():
+            # Loop thread is still blocked inside a native cv2 call (e.g. a
+            # stalled UVC driver) after the join timeout -- releasing the
+            # capture out from under it here would race a concurrent
+            # cap.read()/cap.release() on the same handle, which OpenCV/V4L2
+            # gives no safety guarantee for (can crash or hang the process
+            # on shutdown). Leaving the handle for the OS to reclaim at
+            # process exit is a far smaller risk than that.
+            logger.warning("Video capture thread did not stop within timeout; leaving capture handle for process exit")
+            return
         with self._lock:
             if self._cap is not None:
                 self._cap.release()
@@ -97,11 +114,20 @@ class VideoEngine(QObject):
         """Hot-swap the capture device without a full app restart -- same
         idea as PttEngine.set_input_device for the audio side. Only flips a
         flag; the loop thread does the actual (blocking) reopen so this stays
-        instant and can't race with an in-flight read()."""
-        if device == self._device:
+        instant and can't race with an in-flight read().
+
+        An explicit device choice also overrides the macOS synthetic-only
+        default (allow_macos_capture=False, set in main.py for dev laptops):
+        that default exists so the app doesn't hang in AVFoundation's
+        permission machinery *unprompted* at startup -- but an operator
+        deliberately picking a camera in Settings is precisely the moment
+        capture is wanted, and silently staying synthetic here made the
+        Capture-device selector appear completely non-functional on a Mac."""
+        if device == self._device and self._allow_macos_capture:
             return
         with self._lock:
             self._device = device
+            self._allow_macos_capture = True
             self._reopen = True
         if not self._running:
             # Not streaming yet: just record the new device for next start().
@@ -162,56 +188,90 @@ class VideoEngine(QObject):
             cap.release()
             with self._lock:
                 self._cap = None
+            # This now runs every REOPEN_RETRY_INTERVAL_S while the device
+            # is absent -- log the fallback only on the transition into
+            # synthetic, not on every retry heartbeat.
+            if not self._synthetic:
+                logger.warning("No capture device at %s, using synthetic test pattern", device)
             self._synthetic = True
             self.status_changed.emit("synthetic")
-            logger.warning("No capture device at %s, using synthetic test pattern", device)
 
     def _loop(self) -> None:
-        self._open_capture()
+        # Same contract as main_window._on_frame on the consuming side: one
+        # bad iteration (a cv2/V4L2 exception during a reconnect handshake
+        # after a device power blip, say) must cost one frame, never the
+        # thread -- an unguarded exception here would kill this daemon
+        # thread silently, freezing the feed with the status chip stuck on
+        # its last state and nothing ever restarting capture.
         interval = 1.0 / max(1, self._target_fps)
         while self._running:
-            frame_start = time.monotonic()
+            try:
+                self._loop_once(interval)
+            except Exception as exc:  # noqa: BLE001 -- capture must degrade per-frame, not die
+                logger.warning("Video capture iteration failed (%s), continuing", exc)
+                time.sleep(interval)
 
-            if self._reopen:
-                with self._lock:
-                    self._reopen = False
-                    if self._cap is not None:
-                        self._cap.release()
-                        self._cap = None
-                self._open_capture()
+    def _loop_once(self, interval: float) -> None:
+        frame_start = time.monotonic()
 
+        if self._reopen:
+            with self._lock:
+                self._reopen = False
+                if self._cap is not None:
+                    self._cap.release()
+                    self._cap = None
+
+        with self._lock:
+            cap = self._cap
+        if cap is None and self._should_retry_open(frame_start):
+            self._open_capture()
             with self._lock:
                 cap = self._cap
 
-            frame = None
-            if cap is not None:
-                ok, frame = cap.read()
-                if not ok:
-                    logger.warning("Frame read failed, attempting reconnect")
-                    self.status_changed.emit("reconnecting")
-                    with self._lock:
-                        if self._cap is not None:
-                            self._cap.release()
-                            self._cap = None
-                    self._open_capture()
-                    self._sleep_remaining(frame_start, interval)
-                    continue
-
-            if frame is None:
-                frame = self._synthetic_frame()
-
-            self._record_fps()
-            if self._running:
+        frame = None
+        if cap is not None:
+            ok, frame = cap.read()
+            if not ok:
+                logger.warning("Frame read failed, attempting reconnect")
+                self.status_changed.emit("reconnecting")
                 with self._lock:
-                    if self._frame_in_flight:
-                        self._dropped_frames += 1
-                        should_emit = False
-                    else:
-                        self._frame_in_flight = True
-                        should_emit = True
-                if should_emit:
-                    self.frame_ready.emit(frame)
-            self._sleep_remaining(frame_start, interval)
+                    if self._cap is not None:
+                        self._cap.release()
+                        self._cap = None
+                # Next iterations keep retrying via _should_retry_open --
+                # the old code retried exactly once, right now, which on a
+                # jostled USB grabber usually fires before the OS has
+                # re-enumerated the device, permanently stranding the app
+                # on the synthetic pattern even after the grabber came back.
+                self._sleep_remaining(frame_start, interval)
+                return
+
+        if frame is None:
+            frame = self._synthetic_frame()
+
+        self._record_fps()
+        if self._running:
+            with self._lock:
+                if self._frame_in_flight:
+                    self._dropped_frames += 1
+                    should_emit = False
+                else:
+                    self._frame_in_flight = True
+                    should_emit = True
+            if should_emit:
+                self.frame_ready.emit(frame)
+        self._sleep_remaining(frame_start, interval)
+
+    def _should_retry_open(self, now: float) -> bool:
+        """Throttled periodic reopen while no capture device is held -- so
+        a grabber that appears later (booted before it enumerated, or
+        replugged mid-ride) gets picked up automatically instead of only on
+        a manual Settings change. cv2.VideoCapture() blocks, so this must
+        not run every frame interval."""
+        if now - self._last_reopen_attempt_at < REOPEN_RETRY_INTERVAL_S:
+            return False
+        self._last_reopen_attempt_at = now
+        return True
 
     @staticmethod
     def _sleep_remaining(frame_start: float, interval: float) -> None:

@@ -38,6 +38,7 @@ from motocam.gimbal.base import GimbalController
 from motocam.gimbal.factory import build_gimbal_controller
 from motocam.gps.gps_manager import GpsManager
 from motocam.network.link_client import LinkClient
+from motocam.ui.haptics import install_haptics
 from motocam.ui.main_window import MainWindow
 from motocam.ui.theme import DARK_STYLESHEET
 from motocam.video.video_engine import VideoEngine
@@ -309,6 +310,12 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(APP_ICON_PATH)))
     app.setStyleSheet(DARK_STYLESHEET)
+    # Virtual haptics: press-flash on every button (see ui/haptics.py).
+    # Config-gated so it can be disabled if it ever misbehaves on the Pi.
+    haptics = None
+    if bool(display_cfg.get("haptics", True)):
+        haptics = install_haptics(app)  # noqa: F841 -- must outlive app.exec (Qt doesn't own filters)
+        logger.info("Virtual haptic feedback enabled")
     logger.info("Qt application created")
     _write_startup_state(config_path, "qt_app_created")
     splash = create_splash()

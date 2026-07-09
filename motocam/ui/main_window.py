@@ -22,6 +22,7 @@ import asyncio
 import base64
 import logging
 import math
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,7 @@ from motocam.ui.widgets.camera_panel import CameraPanel
 from motocam.ui.widgets.gimbal_panel import GimbalPanel
 from motocam.ui.widgets.mode_bar import ModeBar
 from motocam.ui.widgets.preview_view import PreviewView
+from motocam.ui.widgets.service_screen import ServiceScreen
 from motocam.ui.widgets.settings_dialog import ISO_VALUES, SettingsDialog
 from motocam.ui.widgets.stage_banner import StageBanner
 from motocam.ui.widgets.top_bar import StatusChip, TopBar
@@ -102,6 +104,24 @@ class GpsReconfigureWorker(QThread):
             logger.warning("GPS reconfigure failed (%s), falling back to simulated GPS", exc)
             gps = GpsManager(device=None)
         self.completed.emit(gps)
+
+
+def _safe_int(value: object, default: int) -> int:
+    """Coerce an untrusted control-room payload field to int, e.g.
+    STAGE_INFO's stage_number/laps -- a wrong type there (string, None,
+    float) must degrade to the default, not raise into _on_command_received
+    and take the whole control-room link down with it (see
+    _receive_loop/command_received: the slot runs on the same stack as the
+    network read loop, so an uncaught exception here kills that loop's
+    task permanently, not just this one message)."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_str(value: object, default: str) -> str:
+    return value if isinstance(value, str) else default
 
 
 class MainWindow(QMainWindow):
@@ -268,6 +288,11 @@ class MainWindow(QMainWindow):
         self._gimbal_velocity_event: asyncio.Event | None = None
         self._manual_pan_v = 0.0
         self._manual_tilt_v = 0.0
+        # Edge-triggered stop for AI ASSIST/FULL AI: set_velocity is a real
+        # joystick semantic (DUML ch_a/ch_c) that holds its last commanded
+        # rate until told otherwise, so losing the target must send an
+        # explicit zero once -- see _control_tick.
+        self._ai_control_had_target = False
         self._zoom_task: asyncio.Task | None = None
         self._pending_zoom_speed: float | None = None
         self._gps_reconfigure_worker: GpsReconfigureWorker | None = None
@@ -418,6 +443,36 @@ class MainWindow(QMainWindow):
         self._settings.set_finish_values(self._finish_zone.finish_lat, self._finish_zone.finish_lon)
         self._settings.exec()
 
+    def _on_diagnostics_requested(self) -> None:
+        """Read-only field-debugging snapshot (ServiceScreen) -- reuses the
+        exact same values already computed for the control-room telemetry
+        tick and the UI watchdog's stall-log context, refreshed on a timer
+        only while the dialog is actually open."""
+        screen = ServiceScreen(self)
+        refresh_timer = QTimer(screen)
+        refresh_timer.setInterval(1000)
+        refresh_timer.timeout.connect(lambda: self._refresh_diagnostics(screen))
+        self._refresh_diagnostics(screen)
+        refresh_timer.start()
+        screen.exec()
+        refresh_timer.stop()
+
+    def _refresh_diagnostics(self, screen: ServiceScreen) -> None:
+        sys_stats = self.health.latest()
+        video_cfg = self._config.get("video") or {}
+        fix = self.gps.state
+        screen.refresh(
+            video_device=self.video_engine.device,
+            video_format=f"{video_cfg.get('width', '?')}x{video_cfg.get('height', '?')} @ {video_cfg.get('fps', '?')}fps target",
+            video_fps=sys_stats.video_fps,
+            cpu_temp_c=sys_stats.cpu_temp_c,
+            cpu_load_pct=sys_stats.cpu_load_pct,
+            ram_used_pct=sys_stats.ram_used_pct,
+            link_connected=self.link.connected,
+            gps_text=f"{'FIX' if fix.fix else 'NO FIX'} {fix.satellites} SAT ({self.gps.source})",
+            services_summary=self.pipeline_diagnostics_summary(),
+        )
+
     # -- Signal wiring -----------------------------------------------------
     def _wire_signals(self) -> None:
         self.video_engine.frame_ready.connect(self._on_frame)
@@ -478,6 +533,7 @@ class MainWindow(QMainWindow):
         self._settings.finish_apply_requested.connect(self._apply_finish_zone)
         self._settings.finish_use_current_requested.connect(self._on_finish_use_current)
         self._settings.finish_clear_requested.connect(self._on_finish_clear)
+        self._settings.diagnostics_requested.connect(self._on_diagnostics_requested)
         self._settings.exit_requested.connect(self._on_exit_requested)
 
     def _schedule_unique_task(self, attr_name: str, label: str, coro_factory) -> None:
@@ -986,12 +1042,24 @@ class MainWindow(QMainWindow):
 
     # -- Mode / manual override --------------------------------------------
     def _on_mode_selected(self, mode: OperatingMode) -> None:
+        was_ai_active = self.gimbal.mode in (OperatingMode.AI_ASSIST, OperatingMode.FULL_AI)
         self.gimbal.mode = mode
         self.ai_engine.enabled = self._ai_runtime_enabled and mode in (OperatingMode.AI_ASSIST, OperatingMode.FULL_AI)
         if mode in (OperatingMode.AI_ASSIST, OperatingMode.FULL_AI) and not self._ai_runtime_enabled:
             logger.warning("AI mode selected but AI runtime is disabled by config; staying in manual tracking fallback")
         if self.ai_engine.enabled and self._ai_guard_paused():
             logger.warning("AI mode selected while Hailo guard is cooling down: %s", self._ai_suspend_reason)
+        if was_ai_active and mode not in (OperatingMode.AI_ASSIST, OperatingMode.FULL_AI):
+            # Leaving AI ASSIST/FULL AI through the normal mode bar (not
+            # just the MANUAL OVERRIDE panic button, which already did
+            # this): set_velocity holds its last commanded rate until told
+            # otherwise, so a mode switch away from AI must stop the
+            # gimbal explicitly or it keeps moving at whatever the PID last
+            # commanded, same class of bug as losing the target in
+            # _control_tick.
+            asyncio.ensure_future(self.gimbal.stop())
+            self.pid.reset()
+            self._ai_control_had_target = False
         asyncio.ensure_future(self.gimbal.set_mode(mode))
         if mode in (OperatingMode.LOCK, OperatingMode.HOME, OperatingMode.MANUAL):
             self.tracker.clear()
@@ -1035,11 +1103,18 @@ class MainWindow(QMainWindow):
     # -- PID / AI control loop ----------------------------------------------
     def _control_tick(self) -> None:
         if self.gimbal.mode in (OperatingMode.AI_ASSIST, OperatingMode.FULL_AI):
-            if self._last_frame is None:
-                return
-            error = self.tracker.error_from_center(self._last_frame.shape)
+            error = self.tracker.error_from_center(self._last_frame.shape) if self._last_frame is not None else None
             if error is None:
+                if self._ai_control_had_target:
+                    # Target just dropped out (lost/occluded/timed out) --
+                    # without this, the gimbal keeps moving at whatever
+                    # velocity was last commanded indefinitely, since
+                    # nothing else re-sends zero once tracking stops.
+                    self._request_gimbal_velocity(False, 0.0, 0.0)
+                    self.pid.reset()
+                    self._ai_control_had_target = False
                 return
+            self._ai_control_had_target = True
             error_x, error_y = error
             # error_y is positive when the target is BELOW center (image y
             # grows downward), but the app-wide convention -- established by
@@ -1371,7 +1446,9 @@ class MainWindow(QMainWindow):
             self.preview.set_link_state(self.link.connected, self._preview_streaming)
         elif msg_type == MessageType.STAGE_INFO.value:
             self.stage_banner.set_stage(
-                payload.get("stage_number", 0), payload.get("stage_name", ""), payload.get("laps", 0)
+                _safe_int(payload.get("stage_number"), 0),
+                _safe_str(payload.get("stage_name"), ""),
+                _safe_int(payload.get("laps"), 0),
             )
             self._maybe_apply_finish_zone_from_payload(payload)
         elif msg_type == MessageType.PEEL_OFF.value:
@@ -1560,6 +1637,12 @@ class MainWindow(QMainWindow):
         self.video_engine.set_device(device)
         video_cfg = self._config.setdefault("video", {})
         video_cfg["device"] = device
+        if sys.platform == "darwin":
+            # set_device() overrides the macOS synthetic-only default for
+            # this session (see its docstring); persist that so the chosen
+            # camera still works after an app restart instead of silently
+            # reverting to the synthetic pattern.
+            video_cfg["allow_macos_capture"] = True
         self._save_config()
         logger.info("Video capture device changed to %s", device)
 

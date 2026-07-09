@@ -138,6 +138,7 @@ class SettingsDialog(QDialog):
     finish_apply_requested = pyqtSignal(float, float)  # (finish_lat, finish_lon)
     finish_use_current_requested = pyqtSignal()
     finish_clear_requested = pyqtSignal()
+    diagnostics_requested = pyqtSignal()  # open the read-only ServiceScreen (field debugging)
     exit_requested = pyqtSignal()  # quit the whole app (kiosk has no window chrome)
 
     def __init__(self, parent=None):
@@ -219,6 +220,9 @@ class SettingsDialog(QDialog):
         exit_btn.setObjectName("exitButton")
         exit_btn.clicked.connect(self._confirm_exit)
         footer.addWidget(exit_btn)
+        diagnostics_btn = QPushButton("🔧 DIAGNOSTICS")
+        diagnostics_btn.clicked.connect(self.diagnostics_requested.emit)
+        footer.addWidget(diagnostics_btn)
         footer.addStretch(1)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self._on_close)

@@ -1069,7 +1069,15 @@ class MainWindow(QMainWindow):
         if is_fallback_source(self.gps.source):
             self.top_bar.gps_chip.set_state("warn", f"GPS {source_value_display(self.gps.source)}")
         else:
-            self.top_bar.gps_chip.set_state("ok" if fix.fix else "warn", "FIX" if fix.fix else "NO FIX")
+            # Satellite count alongside FIX/NO FIX: GGA's fix-quality flag
+            # (gps_manager.py) goes to 0 both when the receiver sees no
+            # satellites at all and when it sees a few but not enough for a
+            # valid position (weak sky view, multipath near structures) --
+            # without the count, both read identically as "NO FIX" and an
+            # operator can't tell "check the antenna" from "just wait, it's
+            # about to lock".
+            state_text = "FIX" if fix.fix else "NO FIX"
+            self.top_bar.gps_chip.set_state("ok" if fix.fix else "warn", f"{state_text} {fix.satellites} SAT")
         locked = (
             self._ride_lock_enabled
             and fix.fix

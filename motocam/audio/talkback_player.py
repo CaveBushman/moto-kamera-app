@@ -98,3 +98,35 @@ class TalkbackPlayer(QObject):
         if len(chunk) < needed:
             chunk += b"\x00" * (needed - len(chunk))
         outdata[:] = np.frombuffer(chunk, dtype="int16").reshape(-1, 1)
+
+    def play_alert_tone(self, urgent: bool = False) -> bool:
+        """Synthesizes a short alert tone into the talkback output -- the
+        rider's helmet audio. This exists for the finish-zone peel-off
+        warning: QApplication.beep() (the previous cue) routes to the
+        desktop bell, which is typically nonexistent on the Pi kiosk and
+        inaudible on a moving motorcycle anyway; the helmet earpiece is
+        the one audio path guaranteed to reach the rider. Returns False
+        when no output device is available so callers can fall back.
+
+        Tone design: urgent (mandatory zone / director PEEL_OFF) is three
+        rising 180ms pips; non-urgent (warning zone) two short ones --
+        distinguishable without looking at the screen."""
+        if not self.available:
+            return False
+        pips = 3 if urgent else 2
+        base_hz = 1320.0 if urgent else 880.0
+        pip_s, gap_s = 0.18, 0.10
+        samples = []
+        for i in range(pips):
+            t = np.arange(int(SAMPLE_RATE * pip_s)) / SAMPLE_RATE
+            hz = base_hz * (1.0 + 0.12 * i)  # slight rise per pip reads as escalation
+            tone = np.sin(2 * np.pi * hz * t)
+            # 10ms fade in/out so the pips don't click
+            fade = int(SAMPLE_RATE * 0.01)
+            envelope = np.ones_like(tone)
+            envelope[:fade] = np.linspace(0.0, 1.0, fade)
+            envelope[-fade:] = np.linspace(1.0, 0.0, fade)
+            samples.append((tone * envelope * 0.6 * 32767).astype("int16"))
+            samples.append(np.zeros(int(SAMPLE_RATE * gap_s), dtype="int16"))
+        self.feed(np.concatenate(samples).tobytes(), SAMPLE_RATE)
+        return True

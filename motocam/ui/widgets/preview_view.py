@@ -14,6 +14,7 @@ from PyQt6.QtCore import QPoint, QSize, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from motocam.ui.icons import camera_icon, cyclist_icon, finish_flag_icon, gear_icon, peloton_icon
 from motocam.ui.widgets.exposure_rocker import ExposureRocker
 from motocam.ui.widgets.ptt_button import PTTButton
 from motocam.ui.widgets.virtual_joystick import VirtualJoystick
@@ -207,6 +208,7 @@ class PreviewView(QFrame):
 
     tapped = pyqtSignal(int, int)
     cancel_track_requested = pyqtSignal()
+    target_class_toggle_requested = pyqtSignal()  # rider <-> peloton quick switch
 
     def __init__(self):
         super().__init__()
@@ -253,6 +255,7 @@ class PreviewView(QFrame):
         self.finish_zone_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.finish_zone_label.hide()
         self.finish_zone_label.raise_()
+        self._finish_zone_current: tuple[str, str] = ("none", "")
 
         self.switcher_label = QLabel("", self)
         self.switcher_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -299,6 +302,8 @@ class PreviewView(QFrame):
         self.hud_toggle.setObjectName("hudToggle")
         self.hud_toggle.setCheckable(True)
         self.hud_toggle.setChecked(False)
+        self.hud_toggle.setIcon(camera_icon())
+        self.hud_toggle.setIconSize(QSize(20, 20))
         self.hud_toggle.toggled.connect(self._on_hud_toggled)
         self.hud_toggle.adjustSize()
         self.hud_toggle.raise_()
@@ -308,10 +313,55 @@ class PreviewView(QFrame):
         # as the toggle itself.
         self.settings_button = QPushButton("SETTINGS", self)
         self.settings_button.setObjectName("hudToggle")
+        self.settings_button.setIcon(gear_icon())
+        self.settings_button.setIconSize(QSize(20, 20))
         self.settings_button.adjustSize()
         self.settings_button.raise_()
 
+        # One-tap target-class switch (single rider <-> peloton), next to
+        # SETTINGS. At a race start the target is the whole peloton and
+        # switches to a single rider once the race breaks up -- requiring a
+        # trip into Settings' combo box for that (while riding, in gloves)
+        # was the worst interaction in the app. Deliberately NOT disabled
+        # by ride lock: like CANCEL TRACKING it's a single unambiguous
+        # race-time action, and an accidental tap is fully undone by
+        # tapping again.
+        self.target_class_button = QPushButton("TARGET: --", self)
+        self.target_class_button.setObjectName("hudToggle")
+        self.target_class_button.setIconSize(QSize(22, 22))
+        self.target_class_button.clicked.connect(self.target_class_toggle_requested.emit)
+        self.target_class_button.adjustSize()
+        self.target_class_button.raise_()
+
+        # Read-only finish-line pill next to TARGET: "FIN 12.4 km" once
+        # there's a GPS fix, "FIN --" as soon as a finish line is known
+        # (GPX loaded / director push) but before a fix. Its real job is
+        # pre-race confirmation: the GPX load used to be visible only in
+        # the log, so the operator had no way to check from the screen
+        # that the app knows today's finish -- or is still holding
+        # yesterday's. Hidden entirely when no finish is configured.
+        # A flat QPushButton rather than a QLabel purely so it can carry
+        # the checkered-flag pictogram next to its text (QLabel can't hold
+        # a QIcon); it is deliberately not wired to any click handler.
+        self.finish_distance_label = QPushButton("", self)
+        self.finish_distance_label.setObjectName("finToggle")
+        self.finish_distance_label.setIcon(finish_flag_icon())
+        self.finish_distance_label.setIconSize(QSize(20, 20))
+        self.finish_distance_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Disabled = inert: no press animation, no haptic flash (the
+        # app-wide filter skips disabled buttons), no accidental-tap
+        # affordance. Colors below are explicit, so it doesn't gray out.
+        self.finish_distance_label.setEnabled(False)
+        self.finish_distance_label.setStyleSheet(
+            "background-color: rgba(10, 12, 17, 190); color: #dff3ff; "
+            "border: 1px solid rgba(0, 194, 255, 110); border-radius: 18px; "
+            "padding: 8px 16px; font-size: 13px; font-weight: 800; min-height: 0px;"
+        )
+        self.finish_distance_label.hide()
+        self.finish_distance_label.raise_()
+
         self.cancel_track_button.clicked.connect(self.cancel_track_requested.emit)
+        self._tracking_active = False
 
         self._frame_size: tuple[int, int] | None = None
         self._bbox: tuple[int, int, int, int] | None = None
@@ -370,6 +420,37 @@ class PreviewView(QFrame):
         self.hud_toggle.adjustSize()
         self._reposition_layout()
 
+    def set_finish_distance(self, distance_m: float | None, has_finish: bool) -> None:
+        """Update the FIN pill: hidden without a configured finish line,
+        "FIN --" while waiting for a GPS fix, otherwise live distance."""
+        if not has_finish:
+            self.finish_distance_label.hide()
+            self._reposition_layout()
+            return
+        if distance_m is None:
+            text = "FIN --"
+        elif distance_m >= 1000.0:
+            text = f"FIN {distance_m / 1000.0:.1f} km"
+        else:
+            text = f"FIN {distance_m:.0f} m"
+        if self.finish_distance_label.text() != text or self.finish_distance_label.isHidden():
+            self.finish_distance_label.setText(text)
+            self.finish_distance_label.adjustSize()
+            self.finish_distance_label.show()
+            self.finish_distance_label.raise_()
+            self._reposition_layout()
+
+    def set_target_class(self, target_class: str, is_group: bool = False) -> None:
+        """Reflect the active AI target class on the quick-switch pill --
+        called by main_window on toggle AND on a Settings combo change, so
+        the pill can never drift from what the engine actually targets.
+        `is_group` picks the pictogram: one rider vs. the peloton cluster
+        -- recognizable at a glance without reading the label."""
+        self.target_class_button.setIcon(peloton_icon() if is_group else cyclist_icon())
+        self.target_class_button.setText(target_class.upper())
+        self.target_class_button.adjustSize()
+        self._reposition_layout()
+
     def set_ride_locked(self, locked: bool) -> None:
         """Above the configured speed threshold, gray out SETTINGS and the
         CAM/GIMBAL HUD (ISO/shutter/lens taps, multi-item combos) so a
@@ -396,7 +477,15 @@ class PreviewView(QFrame):
     def set_tracking_active(self, active: bool) -> None:
         """Show/hide the CANCEL TRACKING pill -- there was previously no
         direct way to drop a tapped target short of the big RESET button
-        (which also re-homes the gimbal) or cycling modes away and back."""
+        (which also re-homes the gimbal) or cycling modes away and back.
+
+        Change-guarded: called from the per-frame path (~30Hz), and an
+        unguarded _reposition_layout() is a dozen adjustSize/move calls
+        -- per frame, that ate visibly into the Pi's 25ms frame budget
+        for the whole duration of any tracking session."""
+        if active == self._tracking_active:
+            return
+        self._tracking_active = active
         self.cancel_track_button.setVisible(active)
         if active:
             self.cancel_track_button.raise_()
@@ -424,7 +513,16 @@ class PreviewView(QFrame):
 
     def set_finish_zone_state(self, level: str, text: str) -> None:
         """level is "none" (hidden), "warning" (amber heads-up) or
-        "mandatory" (red, hard peel-off distance or a director PEEL_OFF)."""
+        "mandatory" (red, hard peel-off distance or a director PEEL_OFF).
+
+        Change-guarded: the caller re-renders on every GPS tick (2Hz),
+        and an unguarded setStyleSheet is a full widget repolish -- for
+        the entire final kilometre that would mean stylesheet churn +
+        banner re-layout twice a second on the UI thread, alongside the
+        20Hz control tick."""
+        if (level, text) == self._finish_zone_current:
+            return
+        self._finish_zone_current = (level, text)
         if level == "warning":
             self.finish_zone_label.setStyleSheet(
                 "background-color: rgba(146, 64, 14, 232); color: white; "
@@ -555,6 +653,14 @@ class PreviewView(QFrame):
             PTT_MARGIN,
         )
         self.settings_button.move(HUD_SIDE_MARGIN, PTT_MARGIN)
+        self.target_class_button.move(
+            self.settings_button.x() + self.settings_button.width() + 8,
+            PTT_MARGIN,
+        )
+        self.finish_distance_label.move(
+            self.target_class_button.x() + self.target_class_button.width() + 8,
+            PTT_MARGIN,
+        )
         # switcher/talkback depend only on settings_button/hud_toggle
         # (already placed above), and the HUD's own top offset depends on
         # switcher/talkback in turn -- so these must be positioned first.
@@ -672,7 +778,12 @@ class PreviewView(QFrame):
         # talkback banner. All of these are rare/transient states that
         # could in principle coincide, so this can't just pick one fixed
         # slot.
-        y = PTT_MARGIN
+        # Start below the pills row (SETTINGS / TARGET / FIN, and the
+        # CAM/GIMBAL toggle on the right): banners are QLabels that
+        # ignore mouse events, so one overlapping the TARGET pill made a
+        # gloved tap fall through to the video -- becoming an accidental
+        # tap-to-select at the worst possible moment (finish approach).
+        y = self.settings_button.y() + self.settings_button.height() + 8
         for widget in (self.finish_zone_label, self.ride_lock_label, self.cancel_track_button, self.talkback_label):
             if widget.isHidden():
                 continue

@@ -59,6 +59,7 @@ class VideoEngine(QObject):
         height: int = 1080,
         fps: int = 30,
         allow_macos_capture: bool = True,
+        fourcc: str | None = "MJPG",
     ):
         super().__init__()
         self._device = device
@@ -66,6 +67,9 @@ class VideoEngine(QObject):
         self._height = height
         self._target_fps = fps
         self._allow_macos_capture = allow_macos_capture
+        # 4-char pixel format to request from the driver (None = driver
+        # default). MJPG by default -- see _open_capture's comment.
+        self._fourcc = (fourcc or "").strip().upper()[:4] or None
         self._cap: cv2.VideoCapture | None = None
         self._running = False
         self._thread: threading.Thread | None = None
@@ -176,14 +180,33 @@ class VideoEngine(QObject):
 
         cap = cv2.VideoCapture(device)
         if cap.isOpened():
+            # Pixel format FIRST, then geometry: some UVC grabbers (the
+            # AVMATRIX included) expose several formats per resolution and
+            # the driver's default pick can mismatch what it actually
+            # delivers -- symptom is a green band of zero-filled YUV rows
+            # at the bottom of every frame. Forcing MJPG (video.fourcc in
+            # config, default MJPG for real grabbers) selects the mode
+            # these devices are actually designed to stream over USB.
+            if self._fourcc:
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self._fourcc))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
             cap.set(cv2.CAP_PROP_FPS, self._target_fps)
+            got_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+            got_fourcc_s = "".join(chr((got_fourcc >> (8 * i)) & 0xFF) for i in range(4)).strip("\x00")
             with self._lock:
                 self._cap = cap
             self._synthetic = False
             self.status_changed.emit("connected")
-            logger.info("UVC capture opened on device %s", device)
+            # Log the NEGOTIATED format, not the requested one -- when a
+            # green-band/garbled-frame report comes in from the field,
+            # this line is the first thing to check.
+            logger.info(
+                "UVC capture opened on device %s: negotiated %.0fx%.0f @ %.0ffps fourcc=%r (requested %dx%d @ %d %s)",
+                device,
+                cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT), cap.get(cv2.CAP_PROP_FPS),
+                got_fourcc_s, self._width, self._height, self._target_fps, self._fourcc or "driver default",
+            )
         else:
             cap.release()
             with self._lock:

@@ -56,6 +56,7 @@ from motocam.encoder.streaming_encoder import STATUS_CHIP_STATE, StreamingEncode
 from motocam.gimbal.base import GimbalController
 from motocam.gimbal.factory import build_gimbal_backend
 from motocam.gps.finish_zone import FinishZoneMonitor, FinishZoneState, is_escalation
+from motocam.gps.gpx_route import DEFAULT_GPX_DIR, load_finish_from_gpx
 from motocam.gps.gps_manager import GpsManager
 from motocam.network.link_client import LinkClient
 from motocam.tracking.pid import GimbalPid
@@ -162,15 +163,14 @@ class MainWindow(QMainWindow):
         self._ride_lock_speed_kmh = float(safety_cfg.get("ride_lock_speed_kmh", 15.0))
         # Finish-zone peel-off rule (500 m mandatory per the federation's
         # regs, 1 km heads-up so the pilot has time to react -- see
-        # gps/finish_zone.py). finish_lat/lon persist across restarts as a
-        # convenience default, same as the other safety settings, but are
-        # course-specific -- Settings has a CLEAR button for a new race.
-        # `or default` (not just dict.get's own default) so an explicit
-        # `finish_warning_m: null` in config.yaml also falls back cleanly --
-        # but that means an explicit 0 would be swallowed too, so guard on
-        # `is not None` instead of truthiness (0 m is a nonsensical radius
-        # anyway, but silently ignoring an explicit config value is a footgun
-        # worth avoiding regardless).
+        # gps/finish_zone.py). The finish line comes from the stage's route
+        # GPX (newest *.gpx under safety.gpx_dir -- see gps/gpx_route.py):
+        # drop the day's stage file in and it's picked up at start, no
+        # manual coordinate entry. A director STAGE_INFO push still
+        # overrides it live; that override is persisted in config
+        # (finish_lat/lon) and used as the fallback when no GPX is present.
+        # Guard on `is not None` (not truthiness) so an explicit 0 in
+        # config isn't silently swallowed by the default.
         finish_warning_raw = safety_cfg.get("finish_warning_m")
         finish_mandatory_raw = safety_cfg.get("finish_mandatory_m")
         self._finish_zone = FinishZoneMonitor(
@@ -178,6 +178,19 @@ class MainWindow(QMainWindow):
             mandatory_m=float(finish_mandatory_raw) if finish_mandatory_raw is not None else 500.0,
             finish_lat=safety_cfg.get("finish_lat"),
             finish_lon=safety_cfg.get("finish_lon"),
+        )
+        gpx_finish = load_finish_from_gpx(safety_cfg.get("gpx_dir") or DEFAULT_GPX_DIR)
+        if gpx_finish is not None:
+            # GPX wins over any config-persisted coordinates at startup:
+            # the file on disk is the operator's freshest statement of
+            # today's course, while config may still hold last stage's
+            # director push.
+            self._finish_zone.set_finish(gpx_finish.lat, gpx_finish.lon)
+        # Which file/rule the finish came from -- surfaced in the
+        # diagnostics dialog so "is it today's GPX or yesterday's?" is
+        # answerable from the screen, not just the log.
+        self._finish_source = gpx_finish.source if gpx_finish is not None else (
+            "config (STAGE_INFO push)" if self._finish_zone.has_finish else "not set"
         )
         self._finish_zone_gps_state = FinishZoneState.NONE
         # Last GPS-computed distance, kept even across a fix dropout so the
@@ -227,6 +240,16 @@ class MainWindow(QMainWindow):
             detector=NullDetector("initializing" if self._ai_runtime_enabled else "null_disabled"),
             target_class=ai_cfg.get("target_class", "cyclist"),
             confidence=float(ai_cfg.get("confidence", 0.35)),
+        )
+        # Quick-switch pill state (see _on_target_class_toggle): the group
+        # class the pill switches TO, and the single-rider class it comes
+        # back to. Primary starts as the configured target class unless the
+        # config itself starts in group mode (then fall back to "cyclist").
+        self._group_target_class = str(ai_cfg.get("group_class") or "peloton")
+        self._primary_target_class = (
+            self.ai_engine.target_class
+            if self.ai_engine.target_class != self._group_target_class
+            else "cyclist"
         )
         # Inference runs on its own thread (see AiWorker) -- the blocking
         # Hailo wait must never sit on the UI thread's frame callback, or a
@@ -310,6 +333,13 @@ class MainWindow(QMainWindow):
         self.top_bar.set_unit_id(unit_id)
         self.preview.ptt_button.set_available(self.ptt_engine.available)
         self.preview.set_link_state(self.link.connected, self._preview_streaming)
+        self.preview.set_target_class(
+            self.ai_engine.target_class,
+            is_group=self.ai_engine.target_class == self._group_target_class,
+        )
+        # "FIN --" pill from the first frame when a finish line is already
+        # known (GPX/config) -- pre-race confirmation before any GPS fix.
+        self.preview.set_finish_distance(None, self._finish_zone.has_finish)
         self._sync_joystick_active()
 
     # -- UI construction -------------------------------------------------
@@ -440,7 +470,6 @@ class MainWindow(QMainWindow):
         )
         self._settings.set_training_capture_enabled(self.training_capture is not None)
         self._settings.set_safety_values(self._ride_lock_enabled, self._ride_lock_speed_kmh)
-        self._settings.set_finish_values(self._finish_zone.finish_lat, self._finish_zone.finish_lon)
         self._settings.exec()
 
     def _on_diagnostics_requested(self) -> None:
@@ -470,6 +499,12 @@ class MainWindow(QMainWindow):
             ram_used_pct=sys_stats.ram_used_pct,
             link_connected=self.link.connected,
             gps_text=f"{'FIX' if fix.fix else 'NO FIX'} {fix.satellites} SAT ({self.gps.source})",
+            finish_text=(
+                f"{self._finish_zone.finish_lat:.6f}, {self._finish_zone.finish_lon:.6f}"
+                f" — {self._finish_source}"
+                if self._finish_zone.has_finish
+                else "not set (no route GPX in data/, no director push)"
+            ),
             services_summary=self.pipeline_diagnostics_summary(),
         )
 
@@ -483,6 +518,7 @@ class MainWindow(QMainWindow):
 
         self.preview.tapped.connect(self._on_tap)
         self.preview.cancel_track_requested.connect(self._on_cancel_track)
+        self.preview.target_class_toggle_requested.connect(self._on_target_class_toggle)
         self.preview.joystick.moved.connect(self._on_manual_drag)
         self.preview.joystick.released.connect(self._on_manual_drag_end)
         self.preview.zoom_rocker.moved.connect(self._on_zoom_drag)
@@ -530,9 +566,6 @@ class MainWindow(QMainWindow):
         self._settings.gimbal_apply_requested.connect(self._on_gimbal_apply)
         self._settings.ble_scan_requested.connect(self._on_ble_scan_requested)
         self._settings.safety_apply_requested.connect(self._on_safety_apply)
-        self._settings.finish_apply_requested.connect(self._apply_finish_zone)
-        self._settings.finish_use_current_requested.connect(self._on_finish_use_current)
-        self._settings.finish_clear_requested.connect(self._on_finish_clear)
         self._settings.diagnostics_requested.connect(self._on_diagnostics_requested)
         self._settings.exit_requested.connect(self._on_exit_requested)
 
@@ -1162,6 +1195,14 @@ class MainWindow(QMainWindow):
         self.preview.set_ride_locked(locked)
         self._update_finish_zone(fix.lat if fix.fix else None, fix.lon if fix.fix else None)
 
+    def _play_finish_alert(self, urgent: bool) -> None:
+        """Audible finish-zone cue through the rider's helmet audio
+        (talkback output) -- QApplication.beep() is the fallback only:
+        it no-ops on the Pi kiosk (no desktop bell) and would be
+        inaudible on a moving motorcycle regardless."""
+        if not self.talkback_player.play_alert_tone(urgent=urgent):
+            QApplication.beep()
+
     def _update_finish_zone(self, lat: float | None, lon: float | None) -> None:
         if lat is None or lon is None:
             # No GPS fix this tick -- hold the last known finish-zone state
@@ -1178,9 +1219,10 @@ class MainWindow(QMainWindow):
                 "Finish zone: %s at %.0f m (mandatory peel-off inside %.0f m)",
                 state.value, distance_m or 0.0, self._finish_zone.mandatory_m,
             )
-            QApplication.beep()
+            self._play_finish_alert(urgent=state == FinishZoneState.MANDATORY)
         self._finish_zone_gps_state = state
         self._finish_zone_last_distance_m = distance_m
+        self.preview.set_finish_distance(distance_m, self._finish_zone.has_finish)
         self._render_finish_zone_banner()
 
     def _render_finish_zone_banner(self) -> None:
@@ -1460,7 +1502,7 @@ class MainWindow(QMainWindow):
                 f" ({self._peel_off_reason})" if self._peel_off_reason else "",
             )
             if self._peel_off_manual_active:
-                QApplication.beep()
+                self._play_finish_alert(urgent=True)
             self._render_finish_zone_banner()
         elif msg_type == MessageType.SWITCHER_STATE.value:
             self._on_switcher_state(payload)
@@ -1475,9 +1517,29 @@ class MainWindow(QMainWindow):
             self.talkback_player.stop()
             self.preview.set_talkback_active(False)
 
+    def _on_target_class_toggle(self) -> None:
+        """One-tap rider <-> peloton switch (the TARGET pill on the
+        preview). Toggles between the group class (ai.group_class, default
+        "peloton") and whatever non-group class was last active -- with a
+        stock COCO model that's "bicycle", with a custom model "cyclist",
+        so the pill works correctly with both without any configuration."""
+        if self.ai_engine.target_class == self._group_target_class:
+            new_class = self._primary_target_class
+        else:
+            self._primary_target_class = self.ai_engine.target_class
+            new_class = self._group_target_class
+        self.ai_engine.target_class = new_class
+        self.preview.set_target_class(new_class, is_group=new_class == self._group_target_class)
+        logger.info("Target class switched to %s (quick-switch pill)", new_class)
+
     # -- Settings (design doc 6.3 camera params, 9.4/8.5 tracking params) ----
     def _on_target_class_changed(self, target_class: str) -> None:
         self.ai_engine.target_class = target_class
+        if target_class != self._group_target_class:
+            # Remember the operator's chosen single-target class so the
+            # quick-switch pill toggles back to it, not to a stale default.
+            self._primary_target_class = target_class
+        self.preview.set_target_class(target_class, is_group=target_class == self._group_target_class)
 
     def _on_confidence_changed(self, confidence: float) -> None:
         self.ai_engine.confidence = confidence
@@ -1728,39 +1790,21 @@ class MainWindow(QMainWindow):
         self._apply_finish_zone(lat, lon)
 
     def _apply_finish_zone(self, lat: float, lon: float) -> None:
+        """Director STAGE_INFO push -- the only runtime override of the
+        GPX-loaded finish (Settings no longer has manual coordinate
+        entry; the route GPX in data/ is the normal source). Persisted to
+        config so it survives a mid-race app restart, but a *newer* GPX
+        file still wins at the next startup (see __init__)."""
         self._finish_zone.set_finish(lat, lon)
         self._finish_zone_gps_state = FinishZoneState.NONE
         self._finish_zone_last_distance_m = None
+        self._finish_source = "director STAGE_INFO push"
+        self.preview.set_finish_distance(None, True)
         safety_cfg = self._config.setdefault("safety", {})
         safety_cfg["finish_lat"] = lat
         safety_cfg["finish_lon"] = lon
         self._save_config()
-        self._settings.set_finish_values(lat, lon)
         logger.info("Finish line set to %.6f, %.6f", lat, lon)
-
-    def _on_finish_use_current(self) -> None:
-        fix = self.gps.poll()
-        if not fix.fix or fix.lat is None or fix.lon is None:
-            logger.warning("Cannot set finish to current position: no GPS fix")
-            return
-        self._apply_finish_zone(fix.lat, fix.lon)
-
-    def _on_finish_clear(self) -> None:
-        self._finish_zone.clear_finish()
-        self._finish_zone_gps_state = FinishZoneState.NONE
-        self._finish_zone_last_distance_m = None
-        # Route through _render_finish_zone_banner instead of setting
-        # "none" on the preview directly -- clearing the GPS finish line
-        # must not blank an active manual director PEEL_OFF banner, which
-        # is an independent, higher-priority state (see
-        # _render_finish_zone_banner's priority check).
-        self._render_finish_zone_banner()
-        safety_cfg = self._config.setdefault("safety", {})
-        safety_cfg["finish_lat"] = None
-        safety_cfg["finish_lon"] = None
-        self._save_config()
-        self._settings.set_finish_values(None, None)
-        logger.info("Finish line cleared")
 
     def _on_switcher_state(self, payload: dict) -> None:
         live_unit = payload.get("live_unit")

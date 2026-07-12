@@ -19,7 +19,7 @@ class ServiceScreen(QDialog):
         self.setWindowTitle("Diagnostics")
         self.resize(560, 560)
 
-        group = QGroupBox("🔧 DIAGNOSTICS")
+        group = QGroupBox("DIAGNOSTICS")
         form = QFormLayout(group)
         self.device_label = QLabel("--")
         self.format_label = QLabel("--")
@@ -35,6 +35,8 @@ class ServiceScreen(QDialog):
         self.net_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         self.net_label.setMinimumWidth(90)
         self.gps_label = QLabel("--")
+        self.finish_label = QLabel("--")
+        self.finish_label.setWordWrap(True)
         self.services_label = QLabel("--")
         self.services_label.setWordWrap(True)
 
@@ -47,6 +49,7 @@ class ServiceScreen(QDialog):
             ("RAM used", self.ram_label),
             ("Control room link", self.net_label),
             ("GPS fix", self.gps_label),
+            ("Finish line", self.finish_label),
             ("Services", self.services_label),
         ):
             form.addRow(label, widget)
@@ -71,6 +74,7 @@ class ServiceScreen(QDialog):
         ram_used_pct: float | None,
         link_connected: bool,
         gps_text: str,
+        finish_text: str,
         services_summary: str,
     ) -> None:
         self.device_label.setText(str(video_device))
@@ -84,4 +88,5 @@ class ServiceScreen(QDialog):
         self.net_label.style().unpolish(self.net_label)
         self.net_label.style().polish(self.net_label)
         self.gps_label.setText(gps_text)
+        self.finish_label.setText(finish_text)
         self.services_label.setText(services_summary)

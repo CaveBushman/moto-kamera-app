@@ -217,10 +217,14 @@ QPushButton#hudToggle {{
     background-color: rgba(10, 12, 17, 190);
     border: 1px solid rgba(255, 255, 255, 90);
     border-radius: 16px;
-    padding: 8px 16px;
-    font-size: 13px;
+    padding: 10px 18px;
+    font-size: 14px;
     font-weight: 800;
-    min-height: 0px;
+    /* Glove-friendly floor (design doc 11.1): the TARGET pill exists
+       precisely to replace a Settings trip while riding, so it must be
+       comfortably tappable in gloves -- the previous ~35px pill was the
+       smallest interactive target on the screen. */
+    min-height: 26px;
 }}
 
 QPushButton#hudToggle:checked {{

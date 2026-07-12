@@ -185,6 +185,7 @@ def build_video(cfg: dict) -> VideoEngine:
         height=video_cfg.get("height", 1080),
         fps=video_cfg.get("fps", 30),
         allow_macos_capture=allow_macos_capture,
+        fourcc=video_cfg.get("fourcc", "MJPG"),
     )
 
 

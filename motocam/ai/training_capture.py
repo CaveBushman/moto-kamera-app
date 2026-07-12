@@ -31,7 +31,9 @@ be the reason a unit runs out of disk mid-ride.
 from __future__ import annotations
 
 import logging
+import queue
 import shutil
+import threading
 import time
 from pathlib import Path
 
@@ -65,6 +67,16 @@ class TrainingDataCapture:
         self._last_capture_at = 0.0
         self.captured_count = 0
         self._low_disk_logged = False
+        # All disk I/O (JPEG encode, classes.txt, statvfs) runs on this
+        # single writer thread, never on the caller: maybe_capture sits in
+        # the UI thread's per-frame path, and a 1080p JPEG write to a busy
+        # SD card is a 30-150ms stall -- i.e. a visible gimbal stutter
+        # every interval_s while actively tracking. Queue depth 4: if the
+        # card can't keep up, captures are dropped (logged), never queued
+        # into unbounded memory.
+        self._queue: queue.Queue[tuple[np.ndarray, tuple[int, int, int, int], str] | None] = queue.Queue(maxsize=4)
+        self._writer = threading.Thread(target=self._writer_loop, name="training-capture-writer", daemon=True)
+        self._writer.start()
 
     def maybe_capture(
         self,
@@ -84,14 +96,41 @@ class TrainingDataCapture:
         now = time.monotonic()
         if now - self._last_capture_at < self.interval_s:
             return False
+        # Advance the timestamp BEFORE the disk check: on the low-disk
+        # path this throttles the statvfs syscall to once per interval_s
+        # -- without it, a full card meant a disk_usage call on every
+        # single frame (30Hz) for the rest of the ride.
+        self._last_capture_at = now
         if not self._has_free_disk_space():
             return False
-        self._last_capture_at = now
-        self._write_example(frame, bbox, label or self.label)
+        # frame.copy(): the video pipeline reuses/overwrites frame buffers;
+        # by the time the writer thread encodes this, the original may
+        # already hold a newer frame.
+        try:
+            self._queue.put_nowait((frame.copy(), bbox, label or self.label))
+        except queue.Full:
+            logger.warning("Training capture writer backlogged, dropping one example")
+            return False
         self.captured_count += 1
         if self.captured_count % 20 == 0:
-            logger.info("Training capture: %d examples saved to %s", self.captured_count, self.output_dir)
+            logger.info("Training capture: %d examples queued to %s", self.captured_count, self.output_dir)
         return True
+
+    def close(self) -> None:
+        """Stop the writer thread after draining pending writes."""
+        self._queue.put(None)
+        self._writer.join(timeout=5.0)
+
+    def _writer_loop(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            frame, bbox, label = item
+            try:
+                self._write_example(frame, bbox, label)
+            except Exception as exc:  # noqa: BLE001 -- writer thread must never die
+                logger.warning("Training capture write failed: %s", exc)
 
     def _has_free_disk_space(self) -> bool:
         try:

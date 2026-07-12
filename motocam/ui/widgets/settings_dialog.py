@@ -47,13 +47,6 @@ IRIS_VALUES = ["f/1.4", "f/2.0", "f/2.8", "f/4.0", "f/5.6", "f/8.0", "f/11"]
 # auto-acquire silently never fires, so the operator can type any label.
 TARGET_CLASSES = ["cyclist", "peloton", "bicycle", "person", "motorcycle", "car"]
 UNIT_IDS = [f"moto-{i}" for i in range(1, 5)]
-# Sentinel spinbox minimums for the finish-line coordinate fields, one notch
-# outside the real -90..90 / -180..180 range so they can never collide with
-# an actual coordinate -- paired with setSpecialValueText("not set") so an
-# unset finish line reads as "not set" in the UI instead of a plain 0.0/0.0
-# that looks identical to a deliberately entered "Null Island" coordinate.
-FINISH_UNSET_LAT = -91.0
-FINISH_UNSET_LON = -181.0
 GIMBAL_CONNECTIONS = [
     ("Mock / desk test", "mock"),
     ("DJI RS4 Pro BLE", "ble"),
@@ -135,9 +128,6 @@ class SettingsDialog(QDialog):
     gimbal_apply_requested = pyqtSignal(object)  # gimbal config dict
     ble_scan_requested = pyqtSignal(str)  # preferred BLE name filter
     safety_apply_requested = pyqtSignal(bool, float)  # (ride_lock_enabled, ride_lock_speed_kmh)
-    finish_apply_requested = pyqtSignal(float, float)  # (finish_lat, finish_lon)
-    finish_use_current_requested = pyqtSignal()
-    finish_clear_requested = pyqtSignal()
     diagnostics_requested = pyqtSignal()  # open the read-only ServiceScreen (field debugging)
     exit_requested = pyqtSignal()  # quit the whole app (kiosk has no window chrome)
 
@@ -191,22 +181,37 @@ class SettingsDialog(QDialog):
         # shadow already used for the HUD panels/diagnostics dialog
         # (ui/effects.py) -- this dialog was the one place still using flat,
         # shadowless QGroupBoxes.
-        self.groups_grid = ResponsiveGroupGrid()
+        #
+        # Two sections, race-day first: what an operator actually touches
+        # at a race (tracking classes/confidence, exposure, safety
+        # thresholds, capture device) must not share visual rank with
+        # install-time plumbing (BLE UUIDs, CAN bitrate, encoder IP) --
+        # nine equal cards meant scrolling past the plumbing every time,
+        # and one mis-tap in it can drop a live connection mid-race.
+        self.race_grid = ResponsiveGroupGrid()
+        for group in (
+            self._build_tracking_group(),
+            self._build_camera_group(),
+            self._build_safety_group(),
+            self._build_video_group(),
+        ):
+            apply_glass_shadow(group, blur_radius=28, y_offset=8, alpha=130)
+            self.race_grid.add_card(group)
+        content_layout.addWidget(self._section_label("RACE DAY"))
+        content_layout.addWidget(self.race_grid)
+
+        self.setup_grid = ResponsiveGroupGrid()
         for group in (
             self._build_connection_group(),
             self._build_gps_group(),
-            self._build_video_group(),
             self._build_audio_group(),
             self._build_gimbal_group(),
-            self._build_camera_group(),
             self._build_encoder_group(),
-            self._build_tracking_group(),
-            self._build_safety_group(),
-            self._build_finish_zone_group(),
         ):
             apply_glass_shadow(group, blur_radius=28, y_offset=8, alpha=130)
-            self.groups_grid.add_card(group)
-        content_layout.addWidget(self.groups_grid)
+            self.setup_grid.add_card(group)
+        content_layout.addWidget(self._section_label("SETUP / INSTALLATION"))
+        content_layout.addWidget(self.setup_grid)
         content_layout.addStretch(1)
         self.scroll_area.setWidget(content)
         outer_layout.addWidget(self.scroll_area, stretch=1)
@@ -220,7 +225,7 @@ class SettingsDialog(QDialog):
         exit_btn.setObjectName("exitButton")
         exit_btn.clicked.connect(self._confirm_exit)
         footer.addWidget(exit_btn)
-        diagnostics_btn = QPushButton("🔧 DIAGNOSTICS")
+        diagnostics_btn = QPushButton("DIAGNOSTICS")
         diagnostics_btn.clicked.connect(self.diagnostics_requested.emit)
         footer.addWidget(diagnostics_btn)
         footer.addStretch(1)
@@ -325,6 +330,16 @@ class SettingsDialog(QDialog):
         if reply == QMessageBox.StandardButton.Yes:
             self.exit_requested.emit()
 
+    @staticmethod
+    def _section_label(text: str) -> QLabel:
+        """Section divider between the RACE DAY and SETUP card groups."""
+        label = QLabel(text)
+        label.setStyleSheet(
+            "color: #7dd3fc; font-size: 14px; font-weight: 900; "
+            "padding: 14px 2px 6px 2px; background: transparent;"
+        )
+        return label
+
     # -- unit identity & control room link (design doc 6.2, 21) ---------------
     @staticmethod
     def _new_form_layout(parent: QWidget | None = None) -> QFormLayout:
@@ -338,7 +353,7 @@ class SettingsDialog(QDialog):
         return form
 
     def _build_connection_group(self) -> QGroupBox:
-        group = QGroupBox("🔗 CONNECTION")
+        group = QGroupBox("CONNECTION")
         form = self._new_form_layout(group)
 
         self.unit_id_combo = QComboBox()
@@ -394,7 +409,7 @@ class SettingsDialog(QDialog):
 
     # -- GPS -----------------------------------------------------------------
     def _build_gps_group(self) -> QGroupBox:
-        group = QGroupBox("🛰 GPS / GNSS")
+        group = QGroupBox("GPS / GNSS")
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -438,7 +453,7 @@ class SettingsDialog(QDialog):
 
     # -- video source ----------------------------------------------------------
     def _build_video_group(self) -> QGroupBox:
-        group = QGroupBox("🎥 VIDEO SOURCE")
+        group = QGroupBox("VIDEO SOURCE")
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -500,7 +515,7 @@ class SettingsDialog(QDialog):
 
     # -- audio ---------------------------------------------------------------
     def _build_audio_group(self) -> QGroupBox:
-        group = QGroupBox("🔊 AUDIO")
+        group = QGroupBox("AUDIO")
         form = self._new_form_layout(group)
 
         self.input_device_combo = QComboBox()
@@ -527,7 +542,7 @@ class SettingsDialog(QDialog):
 
     # -- gimbal --------------------------------------------------------------
     def _build_gimbal_group(self) -> QGroupBox:
-        group = QGroupBox("🎮 GIMBAL CONTROL")
+        group = QGroupBox("GIMBAL CONTROL")
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -720,7 +735,7 @@ class SettingsDialog(QDialog):
 
     # -- camera & lens --------------------------------------------------------
     def _build_camera_group(self) -> QGroupBox:
-        group = QGroupBox("📷 CAMERA && LENS")  # "&&" escapes to a literal "&" (Qt mnemonic syntax)
+        group = QGroupBox("CAMERA && LENS")  # "&&" escapes to a literal "&" (Qt mnemonic syntax)
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -793,7 +808,7 @@ class SettingsDialog(QDialog):
 
     # -- streaming encoder ------------------------------------------------------
     def _build_encoder_group(self) -> QGroupBox:
-        group = QGroupBox("📡 STREAMING ENCODER")
+        group = QGroupBox("STREAMING ENCODER")
         outer = QVBoxLayout(group)
 
         note = QLabel(
@@ -839,7 +854,7 @@ class SettingsDialog(QDialog):
 
     # -- AI tracking ------------------------------------------------------------
     def _build_tracking_group(self) -> QGroupBox:
-        group = QGroupBox("🎯 AI TRACKING")
+        group = QGroupBox("AI TRACKING")
         outer = QVBoxLayout(group)
 
         # A word-wrapped QLabel added straight to QFormLayout.addRow() can
@@ -967,7 +982,7 @@ class SettingsDialog(QDialog):
 
     # -- ride-safe lockout ------------------------------------------------------
     def _build_safety_group(self) -> QGroupBox:
-        group = QGroupBox("🛡 SAFETY")
+        group = QGroupBox("SAFETY")
         outer = QVBoxLayout(group)
 
         hint = QLabel(
@@ -1001,64 +1016,6 @@ class SettingsDialog(QDialog):
 
     def _emit_safety_apply(self) -> None:
         self.safety_apply_requested.emit(self.ride_lock_checkbox.isChecked(), self.ride_lock_speed_spin.value())
-
-    # -- finish-zone peel-off rule ----------------------------------------------
-    def _build_finish_zone_group(self) -> QGroupBox:
-        group = QGroupBox("🏁 FINISH ZONE")
-        outer = QVBoxLayout(group)
-
-        hint = QLabel(
-            "Race-rule peel-off distance from the finish line. Set the finish "
-            "coordinates once (director push, or USE CURRENT POSITION while "
-            "stood on the line) -- the preview then warns on approach and "
-            "flags the mandatory peel-off distance automatically."
-        )
-        hint.setWordWrap(True)
-        outer.addWidget(hint)
-
-        form = self._new_form_layout()
-        outer.addLayout(form)
-
-        self.finish_lat_spin = QDoubleSpinBox()
-        self.finish_lat_spin.setRange(FINISH_UNSET_LAT, 90.0)
-        self.finish_lat_spin.setDecimals(6)
-        self.finish_lat_spin.setSpecialValueText("not set")
-        form.addRow("Finish latitude", self.finish_lat_spin)
-
-        self.finish_lon_spin = QDoubleSpinBox()
-        self.finish_lon_spin.setRange(FINISH_UNSET_LON, 180.0)
-        self.finish_lon_spin.setDecimals(6)
-        self.finish_lon_spin.setSpecialValueText("not set")
-        form.addRow("Finish longitude", self.finish_lon_spin)
-
-        button_row = QHBoxLayout()
-        apply_btn = QPushButton("APPLY FINISH")
-        apply_btn.clicked.connect(self._emit_finish_apply)
-        button_row.addWidget(apply_btn)
-
-        use_current_btn = QPushButton("USE CURRENT POSITION")
-        use_current_btn.clicked.connect(self.finish_use_current_requested.emit)
-        button_row.addWidget(use_current_btn)
-
-        clear_btn = QPushButton("CLEAR")
-        clear_btn.clicked.connect(self.finish_clear_requested.emit)
-        button_row.addWidget(clear_btn)
-        form.addRow(button_row)
-
-        return group
-
-    def set_finish_values(self, lat: float | None, lon: float | None) -> None:
-        self.finish_lat_spin.setValue(lat if lat is not None else FINISH_UNSET_LAT)
-        self.finish_lon_spin.setValue(lon if lon is not None else FINISH_UNSET_LON)
-
-    def _emit_finish_apply(self) -> None:
-        # Guard against a stray APPLY FINISH click while the fields still
-        # show "not set" -- without this, clicking Apply before entering (or
-        # loading) real coordinates would silently arm a bogus finish line at
-        # the sentinel value instead of doing nothing.
-        if self.finish_lat_spin.value() == FINISH_UNSET_LAT or self.finish_lon_spin.value() == FINISH_UNSET_LON:
-            return
-        self.finish_apply_requested.emit(self.finish_lat_spin.value(), self.finish_lon_spin.value())
 
     @staticmethod
     def _select(combo: QComboBox, text: str | None) -> None:

@@ -192,6 +192,15 @@ class VideoEngine(QObject):
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
             cap.set(cv2.CAP_PROP_FPS, self._target_fps)
+            if self._fourcc:
+                # Set AGAIN after geometry: some V4L2 drivers reset the
+                # pixel format when the frame size changes, quietly
+                # reverting to YUYV -- which on MacroSilicon-based
+                # grabbers (AVMATRIX) delivers short frames whose
+                # zero-filled tail decodes as a green band across the
+                # bottom of every frame. Setting an already-active format
+                # is a no-op, so the double set costs nothing elsewhere.
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self._fourcc))
             got_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
             got_fourcc_s = "".join(chr((got_fourcc >> (8 * i)) & 0xFF) for i in range(4)).strip("\x00")
             with self._lock:
